@@ -16,6 +16,7 @@ end rhyme.
 ## Layout
 
 ```
+annotations/ human-edited files (committed, never regenerated)
 data/        datasets (gitignored)
 notebooks/   exploration
 outputs/     checkpoints, generations, metrics (gitignored)
@@ -121,6 +122,17 @@ python -m radio_ready.classifier
    regression against a Surge-list baseline (`data/artifacts/lexicon_metrics.json`). The
    learned list partly captures rap slang (genre confound), so it is an analysis artifact,
    not the section filter.
+
+   **Vetting words by hand:** `annotations/explicit_word_vetting.csv` holds one row per word
+   with a `verdict` you fill in and a free-text `note`:
+   - `not_explicit`: removed before ranking (e.g. "skrrt", "racks")
+   - `explicit`: always included, even if it ranks low or was added by hand
+   - `unsure` or blank: no effect
+
+   The file is committed and the script never rewrites existing rows. To queue more words for
+   review, run it with `--add-to-vetting N`: any of the top N words not yet in the file are
+   appended with a blank verdict, and re-running adds nothing new. `lexicon_metrics.json`
+   reports the lookup both with and without vetting so you can see the effect.
 3. **`classifier`** fine-tunes DistilRoBERTa on one random section per song with the song's
    label, and scores a song by its highest section (MiSonGyny 2026 recipe). The section-level
    scores separate explicit sections (to rewrite) from clean ones (no-change examples).

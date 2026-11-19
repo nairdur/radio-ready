@@ -13,7 +13,15 @@ Baseline: lookup with the Surge AI Obscenity List (human severity ratings), sing
 with mean severity >= --surge-min-severity. Surge ratings are also attached to every learned
 word as a cross-check.
 
-Run:  python -m radio_ready.learned_lexicon
+Human vetting (annotations/explicit_word_vetting.csv, committed, never overwritten):
+  verdict = not_explicit  word is removed before ranking (e.g. rap slang like "skrrt")
+  verdict = explicit      word is always in the lookup and regression vocabularies
+  verdict = unsure / ""   no effect
+--add-to-vetting N makes sure the top N words of the vetted ranking are in the file, appending
+missing ones with a blank verdict; re-running adds nothing new unless exclusions pulled new
+words into the top N. Existing rows and notes are left untouched.
+
+Run:  python -m radio_ready.learned_lexicon [--add-to-vetting 128]
 Needs data/processed/labels/songs.parquet (python -m radio_ready.labels).
 Writes data/artifacts/learned_explicit_words.csv and data/artifacts/lexicon_metrics.json.
 """
@@ -59,11 +67,47 @@ def load_surge() -> pd.DataFrame:
     )
 
 
+VERDICTS = {"explicit", "not_explicit", "unsure", ""}
+VETTING_COLUMNS = ["word", "verdict", "note", "importance", "df_explicit", "df_clean",
+                   "surge_severity"]
+
+
+def load_vetting() -> pd.DataFrame:
+    """Human verdicts: not_explicit words are dropped, explicit words are always kept."""
+    if not paths.VETTING_CSV.exists():
+        return pd.DataFrame(columns=VETTING_COLUMNS)
+    vet = pd.read_csv(paths.VETTING_CSV, dtype=str, keep_default_na=False)
+    vet["word"] = vet["word"].str.strip().str.lower()
+    vet["verdict"] = vet["verdict"].str.strip().str.lower()
+    bad = sorted(set(vet["verdict"]) - VERDICTS)
+    if bad:
+        raise ValueError(f"{paths.VETTING_CSV}: unknown verdicts {bad}; use {sorted(VERDICTS - {''})}")
+    return vet.drop_duplicates("word", keep="last")
+
+
+def add_to_vetting(lex: pd.DataFrame, vet: pd.DataFrame, top: int) -> int:
+    """Ensure the top N ranked words are in the vetting file (idempotent).
+
+    Only missing words are appended; existing rows and notes are never changed.
+    """
+    new = lex.head(top)
+    new = new[~new["word"].isin(vet["word"])].copy()
+    if new.empty:
+        return 0
+    new["verdict"], new["note"] = "", ""
+    paths.ANNOTATIONS.mkdir(parents=True, exist_ok=True)
+    write_header = not paths.VETTING_CSV.exists()
+    new[VETTING_COLUMNS].to_csv(paths.VETTING_CSV, mode="a", header=write_header, index=False)
+    return len(new)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Learn an explicit-word dictionary (Fell 2019).")
     parser.add_argument("--min-df", type=int, default=10)
     parser.add_argument("--max-clean-rate", type=float, default=0.3)
     parser.add_argument("--surge-min-severity", type=float, default=2.0)
+    parser.add_argument("--add-to-vetting", type=int, default=0, metavar="N",
+                        help="append the top N not-yet-vetted words to the vetting CSV")
     args = parser.parse_args()
 
     songs = pd.read_parquet(SONGS)
@@ -98,6 +142,20 @@ def main() -> None:
     lex = lex.sort_values("importance", ascending=False).head(1000).reset_index(drop=True)
     lex.insert(0, "rank", lex.index + 1)
     lex = lex.join(load_surge(), on="word")
+    lex["importance"] = lex["importance"].round(2)
+
+    vet = load_vetting()
+    verdict = dict(zip(vet["word"], vet["verdict"]))
+    lex["verdict"] = lex["word"].map(verdict).fillna("")
+    raw = lex
+    lex = lex[lex["verdict"] != "not_explicit"].reset_index(drop=True)
+    lex.insert(1, "vetted_rank", lex.index + 1)
+    forced = [w for w, v in verdict.items() if v == "explicit"]
+    added = add_to_vetting(lex, vet, args.add_to_vetting) if args.add_to_vetting else 0
+
+    def top_words(n: int) -> list[str]:
+        words = lex["word"].head(n).tolist()
+        return words + [w for w in forced if w not in words]
 
     def lookup(split: str, words: set[str]) -> np.ndarray:
         return np.array([bool(v & words) for v in sets[split]["vocab"]])
@@ -113,9 +171,9 @@ def main() -> None:
 
     val_scores = {}
     for n in SIZES:
-        words = set(lex["word"].head(n))
-        val_scores[("lookup", n)] = f1_score(labels["val"], lookup("val", words), average="macro")
-        vocab = lex["word"].head(n).tolist()
+        vocab = top_words(n)
+        val_scores[("lookup", n)] = f1_score(
+            labels["val"], lookup("val", set(vocab)), average="macro")
         clf = LogisticRegression(class_weight="balanced", max_iter=2000)
         clf.fit(counts("train", vocab), y)
         val_scores[("regression", n)] = f1_score(
@@ -129,8 +187,14 @@ def main() -> None:
                                         for (m, n), s in val_scores.items()},
                "best_size": best, "test": {}, "gold": {}}
 
-    lookup_words = set(lex["word"].head(best["lookup"]))
-    reg_vocab = lex["word"].head(best["regression"]).tolist()
+    lookup_words = set(top_words(best["lookup"]))
+    raw_words = set(raw["word"].head(best["lookup"]))
+    reg_vocab = top_words(best["regression"])
+    results["vetting"] = {
+        "excluded_not_explicit": int((raw["verdict"] == "not_explicit").sum()),
+        "forced_explicit": len(forced),
+        "unvetted_in_lookup": int((lex["verdict"].head(best["lookup"]) == "").sum()),
+    }
     clf = LogisticRegression(class_weight="balanced", max_iter=2000).fit(counts("train", reg_vocab), y)
     surge = load_surge()
     surge_words = set(surge.index[(surge["surge_severity"] >= args.surge_min_severity)
@@ -139,14 +203,15 @@ def main() -> None:
         results[split]["majority_clean"] = metrics(labels[split], np.zeros_like(labels[split]))
         results[split][f"surge_lookup_sev>={args.surge_min_severity}"] = metrics(
             labels[split], lookup(split, surge_words))
+        results[split][f"learned_lookup_unvetted@{best['lookup']}"] = metrics(
+            labels[split], lookup(split, raw_words))
         results[split][f"learned_lookup@{best['lookup']}"] = metrics(
             labels[split], lookup(split, lookup_words))
         results[split][f"learned_regression@{best['regression']}"] = metrics(
             labels[split], clf.predict(counts(split, reg_vocab)))
 
-    lex["in_lookup"] = lex["rank"] <= best["lookup"]
-    lex["in_regression"] = lex["rank"] <= best["regression"]
-    lex["importance"] = lex["importance"].round(2)
+    lex["in_lookup"] = lex["word"].isin(lookup_words)
+    lex["in_regression"] = lex["word"].isin(reg_vocab)
     paths.ARTIFACTS.mkdir(parents=True, exist_ok=True)
     lex.to_csv(paths.ARTIFACTS / "learned_explicit_words.csv", index=False)
     with open(paths.ARTIFACTS / "lexicon_metrics.json", "w") as f:
@@ -160,6 +225,9 @@ def main() -> None:
     top = lex.head(best["lookup"])
     print(f"\ntop-{best['lookup']} learned words with a Surge rating: "
           f"{top['surge_severity'].notna().sum()}/{len(top)}")
+    print(f"vetting: {results['vetting']}")
+    if added:
+        print(f"appended {added} unvetted words to {paths.VETTING_CSV}")
     print(f"outputs: {paths.ARTIFACTS / 'learned_explicit_words.csv'}, lexicon_metrics.json")
 
 
