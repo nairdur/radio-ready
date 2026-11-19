@@ -11,8 +11,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = Path("data/genius-expertise/lyrics.jl")
 DEFAULT_WORDS_CSV = Path("reference/explicit_words.csv")
 DEFAULT_OUTPUT = Path("output/genius_explicit_stanzas_by_artist.json")
+DEFAULT_STANZA_CSV = Path("output/genius_selected_stanzas.csv")
 
-BRACKET_SECTION = re.compile(r"^\s*\[([^\]]*)\]\s*$")
+BRACKET_SECTION = re.compile(r"\[([^\]]+)\]")
 SONG_SUFFIX = re.compile(r"(?:-lyrics)?$", re.IGNORECASE)
 
 
@@ -135,6 +136,8 @@ def extract_explicit_stanzas(
         for offset in range(0, len(chunk_lines), stanza_size):
             chunk = chunk_lines[offset : offset + stanza_size]
             text = "\n".join(chunk)
+            if BRACKET_SECTION.search(text):
+                continue
             matched_words = find_matches(text, patterns)
             if not matched_words:
                 continue
@@ -150,12 +153,12 @@ def extract_explicit_stanzas(
             )
 
     for line in lines:
-        match = BRACKET_SECTION.match(line)
-        if match:
+        full_line_section = BRACKET_SECTION.fullmatch(line)
+        if full_line_section:
             if section_lines:
                 append_chunks(section_lines, section)
                 section_lines = []
-            section = match.group(1).strip()
+            section = full_line_section.group(1).strip()
             continue
         section_lines.append(line)
 
@@ -219,10 +222,15 @@ def build_artist_sample(
             patterns,
             stanza_size,
         )
+        selected_stanza = rng.choice(stanzas) if stanzas else None
+        if selected_stanza is None:
+            continue
+
         artist_result[artist] = {
             "song_slug": chosen["slug"],
             "song_title": infer_song_title(chosen["slug"], artist),
-            "stanzas": stanzas,
+            "full_song_title": slug_title(chosen["slug"]),
+            "selected_stanza": selected_stanza,
         }
 
     result["artists"] = artist_result
@@ -239,6 +247,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--words-csv", type=Path, default=DEFAULT_WORDS_CSV)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--stanza-csv", type=Path, default=DEFAULT_STANZA_CSV)
     parser.add_argument("--stanza-size", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -253,6 +262,7 @@ def main() -> None:
     input_path = resolve_path(args.input)
     words_path = resolve_path(args.words_csv)
     output_path = resolve_path(args.output)
+    stanza_csv_path = resolve_path(args.stanza_csv)
 
     words = load_explicit_words(words_path)
     result = build_artist_sample(
@@ -267,11 +277,33 @@ def main() -> None:
         json.dump(result, output_file, indent=2, ensure_ascii=False)
         output_file.write("\n")
 
-    artist_count = len(result["artists"])
+    artists = result["artists"]
+    artist_count = len(artists)
+    stanza_count = 0
+
+    stanza_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with stanza_csv_path.open("w", encoding="utf-8", newline="") as stanza_file:
+        writer = csv.writer(stanza_file)
+        writer.writerow(["artist|full song title", "stanza"])
+
+        for artist, artist_data in artists.items():
+            selected_stanza = artist_data["selected_stanza"]
+            if selected_stanza is None:
+                continue
+            writer.writerow(
+                [
+                    f"[{artist}|{artist_data['full_song_title']}]",
+                    selected_stanza["text"],
+                ]
+            )
+            stanza_count += 1
+
     print(
-        f"Wrote one random song for {artist_count} artist(s) "
-        f"from {len(words)} explicit word(s) to {output_path}"
+        f"Wrote one random song for {artist_count} artist(s) and "
+        f"{stanza_count} selected stanza(s) from {len(words)} explicit word(s)"
     )
+    print(f"JSON: {output_path}")
+    print(f"CSV:  {stanza_csv_path}")
 
 
 if __name__ == "__main__":

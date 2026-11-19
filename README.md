@@ -18,6 +18,7 @@ Options:
 - `--input` selects the JSONL lyrics file.
 - `--words-csv` selects the explicit-word CSV.
 - `--output` selects the output JSON file.
+- `--stanza-csv` selects the separate stanza-only CSV file.
 - `--stanza-size` sets the number of lyric lines per chunk (default: `4`).
 - `--seed` sets the random-song sampling seed (default: `42`).
 
@@ -29,6 +30,7 @@ The script's explicit defaults are:
 - Input: `data/genius-expertise/lyrics.jl`
 - Word CSV: `reference/explicit_words.csv`
 - Output: `output/genius_explicit_stanzas_by_artist.json`
+- Stanza CSV: `output/genius_selected_stanzas.csv`
 
 ## Set up datasets
 
