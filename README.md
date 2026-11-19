@@ -24,7 +24,44 @@ case-insensitive matching is used.
 
 The script's explicit defaults are:
 
-- Input: `C:\Users\light\Development\radio-ready\data\genius-expertise\lyrics.jl`
-- Word CSV: `C:\Users\light\Development\radio-ready\reference\explicit_words.csv`
-- Output: `C:\Users\light\Development\radio-ready\output\genius_explicit_stanzas.csv`
+- Input: `data/genius-expertise/lyrics.jl`
+- Word CSV: `reference/explicit_words.csv`
+- Output: `output/genius_explicit_stanzas.csv`
+
+## Set up datasets
+
+The project uses three data sources:
+
+| Source | Local folder |
+| --- | --- |
+| Cornell genius-expertise dataset: https://www.cs.cornell.edu/~arb/data/genius-expertise/ | `data/genius-expertise` |
+| Kaggle Genius lyrics: `carlosgdcj/genius-song-lyrics-with-language-information` | `data/genius-song-lyrics` |
+| Kaggle 900K Spotify: `devdope/900k-spotify` | `data/500k-spotify-lyrics` |
+
+Install the Kaggle download dependency:
+
+```powershell
+python -m pip install -r requirements-data.txt
+```
+
+Authenticate Kaggle before downloading. The Kaggle API checks for credentials
+through the usual local Kaggle configuration (normally `~/.kaggle/kaggle.json`
+or Kaggle environment variables).
+
+Download both Kaggle datasets:
+
+```powershell
+python src/setup_data.py all
+```
+
+Or download one dataset at a time:
+
+```powershell
+python src/setup_data.py genius-kaggle
+python src/setup_data.py spotify-kaggle
+```
+
+The Cornell [genius-expertise data](https://www.cs.cornell.edu/~arb/data/genius-expertise/)
+is not downloaded by the Kaggle setup script. Download the Cornell archive or
+files listed on that page and place them in `data/genius-expertise`.
 

@@ -7,9 +7,9 @@ from typing import Iterable
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = REPOSITORY_ROOT / "data" / "genius-expertise" / "lyrics.jl"
-DEFAULT_WORDS_CSV = REPOSITORY_ROOT / "reference" / "explicit_words.csv"
-DEFAULT_OUTPUT = REPOSITORY_ROOT / "output" / "genius_explicit_stanzas.csv"
+DEFAULT_INPUT = Path("data/genius-expertise/lyrics.jl")
+DEFAULT_WORDS_CSV = Path("reference/explicit_words.csv")
+DEFAULT_OUTPUT = Path("output/genius_explicit_stanzas.csv")
 
 
 def load_explicit_words(words_csv: Path) -> list[str]:
@@ -165,11 +165,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    words = load_explicit_words(args.words_csv)
-    count = extract_stanzas(args.input, words, args.output, args.context)
+    input_path = (
+        args.input if args.input.is_absolute()
+        else REPOSITORY_ROOT / args.input
+    )
+    words_path = (
+        args.words_csv if args.words_csv.is_absolute()
+        else REPOSITORY_ROOT / args.words_csv
+    )
+    output_path = (
+        args.output if args.output.is_absolute()
+        else REPOSITORY_ROOT / args.output
+    )
+    words = load_explicit_words(words_path)
+    count = extract_stanzas(input_path, words, output_path, args.context)
     print(
         f"Wrote {count} matching stanza row(s) from "
-        f"{len(words)} word(s) to {args.output}"
+        f"{len(words)} word(s) to {output_path}"
     )
 
 
