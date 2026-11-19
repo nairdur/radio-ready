@@ -1,10 +1,11 @@
 # radio-ready
 
-## Extract explicit-word stanzas
+## Extract explicit-word stanzas by artist
 
-`src/extract_explicit_stanzas.py` searches the JSONL lyrics dataset for words
-listed in `reference/explicit_words.csv`. It writes one CSV row per
-matching lyrics line, including the four surrounding lines above and below.
+`src/extract_explicit_stanzas.py` reads JSONL lyrics, infers artists by
+comparing consecutive song-title slugs, derives the song title from the remaining
+slug text, chooses one random song per artist, and splits each song into
+bracket-section chunks.
 
 Run it from the repository root:
 
@@ -16,8 +17,9 @@ Options:
 
 - `--input` selects the JSONL lyrics file.
 - `--words-csv` selects the explicit-word CSV.
-- `--output` selects the output CSV.
-- `--context` changes the number of surrounding lines (default: `4`).
+- `--output` selects the output JSON file.
+- `--stanza-size` sets the number of lyric lines per chunk (default: `4`).
+- `--seed` sets the random-song sampling seed (default: `42`).
 
 The word CSV can have a `word` header and one term per row. Whole-word,
 case-insensitive matching is used.
@@ -26,7 +28,7 @@ The script's explicit defaults are:
 
 - Input: `data/genius-expertise/lyrics.jl`
 - Word CSV: `reference/explicit_words.csv`
-- Output: `output/genius_explicit_stanzas.csv`
+- Output: `output/genius_explicit_stanzas_by_artist.json`
 
 ## Set up datasets
 
