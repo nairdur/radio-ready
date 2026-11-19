@@ -1,0 +1,57 @@
+# ---- Data (large / licensed — never commit) ----
+data/**
+!data/.gitkeep
+
+# ---- Experiment artifacts ----
+outputs/**
+!outputs/.gitkeep
+checkpoints/
+runs/
+wandb/
+mlruns/
+lightning_logs/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+
+# ---- Hugging Face / Kaggle caches & secrets ----
+.cache/
+hf_cache/
+kaggle.json
+.env
+.env.*
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Notebooks ----
+.ipynb_checkpoints/
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Claude Code local settings ----
+.claude/settings.local.json

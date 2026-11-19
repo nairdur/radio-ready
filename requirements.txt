@@ -1,0 +1,11 @@
+torch
+transformers
+peft
+datasets
+accelerate
+sentence-transformers
+bert-score
+pronouncing
+pandas
+tqdm
+kagglehub
