@@ -11,8 +11,8 @@ A section is eligible when its type is a sung/rapped part (verse, chorus, hook, 
 --min-lines..--max-lines lines, and its main lines contain a strong explicit word.
 
 Sampling mirrors the earlier branch: one random eligible song per artist (reservoir sampling,
-seeded), then one random eligible section from that song. Songs in the Kidz Bop data are
-excluded so human-written eval pairs never leak into synthetic data.
+seeded), then one random eligible section from that song. Songs in the Kidz Bop data
+(fuzzy title + artist match) are excluded so DPO negatives never overlap synthetic data.
 
 Run:  python -m radio_ready.genius [--tags rap trap pop rb] [--limit 50000]
 Writes data/processed/genius_sections.jsonl
@@ -148,13 +148,59 @@ def rhyme_scheme(lines: list[str]) -> str:
     return "".join(scheme)
 
 
-def song_key(artist: str, title: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", f"{artist}{title}".lower())
+FEATURE = re.compile(r"\s*[\(\[]?\b(?:feat|ft|featuring|with)\b\.?.*$", re.IGNORECASE)
+ARTIST_SPLIT = re.compile(r"\s*(?:,|&|\+|\band\b|\bx\b|\bfeat\.?|\bft\.?|\bfeaturing\b)\s*", re.I)
 
 
-def kidz_bop_songs() -> set[str]:
-    kb = pd.read_csv(paths.KIDZ_BOP_CSV, usecols=["ogArtist", "songName"])
-    return {song_key(a, s) for a, s in zip(kb["ogArtist"], kb["songName"])}
+def title_key(title: str) -> str:
+    """Normalized title without featured artists or bracketed version notes."""
+    title = re.sub(r"[\(\[][^\)\]]*[\)\]]", "", str(title))  # "(2017)", "(sam smith)", "[Remix]"
+    title = re.sub(r"\s+-\s+\d+$", "", title)  # Kidz Bop ids: "i gotta feeling - 1461400"
+    title = re.sub(r"&|\band\b", " ", FEATURE.sub("", title), flags=re.I)  # Genius drops "&"
+    return re.sub(r"[^a-z0-9]", "", title.lower())
+
+
+def artist_keys(artist: str) -> set[str]:
+    artist = re.sub(r"\([^)]*\)", "", normalize(str(artist)))  # "Jet (band)"
+    parts = ARTIST_SPLIT.split(artist.lower())
+    return {k for k in (re.sub(r"[^a-z0-9]", "", p) for p in parts) if k}
+
+
+def same_artist(a: str, b: str) -> bool:
+    """True when any credited artist matches (or one name contains the other)."""
+    ka, kb = artist_keys(a), artist_keys(b)
+    return any(x == y or (min(len(x), len(y)) >= 4 and (x in y or y in x)) for x in ka for y in kb)
+
+
+class KidzBopSongs:
+    """Fuzzy lookup of Kidz Bop songs (normalized artist, song) from a Genius artist + title.
+
+    Exact title key + overlapping artist; otherwise, for an exactly matching artist, a Genius
+    title that starts with the Kidz Bop title ("Stronger What Doesnt Kill You" for "stronger").
+    """
+
+    def __init__(self):
+        kb = pd.read_csv(paths.KIDZ_BOP_CSV, usecols=["ogArtist", "songName"])
+        songs = {(normalize(str(a)), normalize(str(s))) for a, s in zip(kb["ogArtist"], kb["songName"])}
+        self.by_title: dict[str, list[tuple[str, str]]] = {}
+        self.by_artist: dict[str, list[tuple[str, tuple[str, str]]]] = {}
+        for artist, song in songs:
+            key = title_key(song)
+            self.by_title.setdefault(key, []).append((artist, song))
+            for a in artist_keys(artist):
+                self.by_artist.setdefault(a, []).append((key, (artist, song)))
+
+    def match(self, artist: str, title: str) -> list[tuple[str, str]]:
+        key = title_key(title)
+        hits = [(a, s) for a, s in self.by_title.get(key, []) if same_artist(a, artist)]
+        if hits:
+            return hits
+        found = set()
+        for a in artist_keys(artist):
+            for kb_key, song in self.by_artist.get(a, []):
+                if len(kb_key) >= 5 and key.startswith(kb_key):
+                    found.add(song)
+        return sorted(found)
 
 
 def build_record(row: dict, sections: list[Section], index: int, explicit: tuple, eligible: int):
@@ -215,7 +261,7 @@ def main() -> None:
     args = parser.parse_args()
 
     matcher = ExplicitMatcher(tiers=("strong",))
-    excluded = kidz_bop_songs()
+    kidz_bop = KidzBopSongs()
     rng = random.Random(args.seed)
     counts: Counter = Counter()
     chosen: dict[str, dict] = {}
@@ -227,7 +273,7 @@ def main() -> None:
         if not matcher.pattern.search(row["lyrics"]):
             continue
         stats["explicit_songs"] += 1
-        if song_key(row["artist"], row["title"]) in excluded:
+        if kidz_bop.match(row["artist"], row["title"]):
             stats["kidz_bop_excluded"] += 1
             continue
         sections = split_sections(row["lyrics"])

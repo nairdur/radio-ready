@@ -46,16 +46,17 @@ python -m radio_ready.download all
 ```
 
 Or pick sources: `paradetox`, `kidz-bop`, `genius`, `spotify-tracks`, `surge-profanity`,
-`mgphot`, `models`.
+`mgphot`, `twitteraae`, `models`.
 
 | Source | Folder | Use |
 | --- | --- | --- |
 | [ParaDetox](https://huggingface.co/datasets/s-nlp/paradetox) | `data/raw/paradetox` | general detox SFT |
-| [The Pudding: Kidz Bop censored lyrics](https://github.com/the-pudding/data/tree/master/kidz-bop) | `data/raw/kidz-bop` | word substitutions, explicit-word list, human eval pairs |
+| [The Pudding: Kidz Bop censored lyrics](https://github.com/the-pudding/data/tree/master/kidz-bop) | `data/raw/kidz-bop` | word substitutions, explicit-word list, DPO negatives |
 | [Genius lyrics (cleaned)](https://huggingface.co/datasets/theelderemo/genius-lyrics-cleaned) (~2.4 GB) | `data/raw/genius` | explicit stanzas for synthetic rewrites |
 | [Spotify tracks](https://huggingface.co/datasets/maharshipandya/spotify-tracks-dataset) | `data/raw/spotify-tracks` | Spotify API `explicit` flag per track (training labels) |
 | [MGPHot](https://zenodo.org/records/15372063) (TISMIR 2025, CC BY-NC-ND) | `data/raw/mgphot` | expert "Explicit Lyrics" scores, Billboard Hot 100 (gold labels) |
 | [Surge AI Obscenity List](https://huggingface.co/datasets/mmathys/profanity) (MIT) | `data/raw/surge-profanity` | 1.6k profanities with human severity ratings |
+| [TwitterAAE](https://github.com/slanglab/twitteraae) (EMNLP 2016, MIT) | `data/raw/twitteraae` | dialect model (count tables only) for AAE-level tags |
 
 Scoring models (Hugging Face cache), following ParaDeHate:
 
@@ -87,14 +88,18 @@ python -m radio_ready.genius
    common replacements found by diffing original vs. Kidz Bop lines
    (`data/artifacts/kidzbop_substitutions.csv`). Each word has a tier: `strong` (bleeped on
    radio, used for detection), `mild` (damn, hell), or `kb_only` (censored only by Kidz Bop).
-2. **`kidzbop`** drops cut verses and duplicates, scores each human-written pair (similarity,
-   toxicity + lexicon, syllables, end rhyme, edit ratio), keeps radio-relevant pairs (original
-   has a strong explicit word or toxicity ≥ 0.5) minus near-duplicate lines within a song, takes
-   the top 30% by `quality = similarity × clean × syllable score × rhyme bonus`, and splits by song into
-   `data/processed/kidzbop/{train,val,test}.jsonl`. All scores are in `pairs_scored.csv`.
+2. **`kidzbop`** compiles Kidz Bop edits into **DPO negatives** (bad radio edits to train
+   against, never targets). Each rewrite gets rule-based failure tags: `cut` (line deleted),
+   `over_censored` (original had nothing radio-explicit), `still_explicit`, `meaning_drift`
+   (similarity < 0.70), `syllable_break` (±2 or more), `rhyme_break`. `over_censored` rows are
+   complete pairs (chosen = unchanged original); the rest are marked `needs_chosen` for a
+   synthetic rewrite. Each line is located in its Genius song (fuzzy title + artist match) to
+   attach the surrounding section as prompt context. Splits are by song. Output:
+   `data/processed/kidzbop/dpo_negatives.jsonl`; all rows and scores in `pairs_scored.csv`.
 3. **`genius`** cleans lyrics (section headers → metadata, ad-libs separated, scrape junk and
    repeated choruses removed), finds sections with strong explicit words, and picks one random
-   song per artist and one random explicit section from it. Kidz Bop songs are excluded.
+   song per artist and one random explicit section from it. Kidz Bop songs are excluded
+   (same fuzzy match), so negatives and synthetic data never share a song.
    Output: `data/processed/genius_sections.jsonl`, with per-line syllables, stress, rhyme
    scheme, and surrounding context, ready for synthetic rewriting.
 
@@ -137,3 +142,23 @@ python -m radio_ready.classifier
    label, and scores a song by its highest section (MiSonGyny 2026 recipe). The section-level
    scores separate explicit sections (to rewrite) from clean ones (no-change examples).
    Output: `outputs/explicit_classifier/`.
+
+## Vernacular preservation (AAE proportion)
+
+```bash
+python -m radio_ready.aae
+```
+
+Run after `genius`. It adds `aae_proportion` to every record in
+`data/processed/genius_sections.jsonl` (or the JSONL files you pass): the share of the
+section's words that come from the African American English topic of the TwitterAAE model
+(Blodgett et al., EMNLP 2016). This is a proportion of vernacular in the text, not a class for
+the section or its author, and it never filters anything.
+
+It is a post-check metric for rewrites: `aae.vernacular_shift(scorer, original, rewrite)`
+returns the proportion before and after, and a large negative `aae_delta` means the rewrite
+standardized the vernacular instead of only removing explicit content. On the current sections
+the median proportion is 0.41 for rap, 0.31 for R&B and 0.21 for pop.
+
+The model's learned count tables are used unmodified; the inference is adapted from the
+authors' MIT-licensed `predict.py`, with their copyright and license notice in `aae.py`.

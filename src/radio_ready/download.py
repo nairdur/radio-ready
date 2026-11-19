@@ -25,6 +25,10 @@ HF_DATASETS = {
 MGPHOT_URL = "https://zenodo.org/records/15372063/files/{}?download=1"
 MGPHOT_FILES = ["mgphot_genes.tsv", "mgphot_gene_values.tsv"]
 
+# TwitterAAE (Blodgett et al., EMNLP 2016, MIT): demographic dialect model, data files only.
+TWITTERAAE_URL = "https://raw.githubusercontent.com/slanglab/twitteraae/master/model/{}"
+TWITTERAAE_FILES = ["model_vocab.txt", "model_count_table.txt"]
+
 KIDZ_BOP_URL = (
     "https://raw.githubusercontent.com/the-pudding/data/master/kidz-bop/KB_censored-lyrics.csv"
 )
@@ -38,7 +42,8 @@ MODELS = [
 ]
 
 SOURCES = [
-    "paradetox", "kidz-bop", "genius", "spotify-tracks", "surge-profanity", "mgphot", "models",
+    "paradetox", "kidz-bop", "genius", "spotify-tracks", "surge-profanity", "mgphot", "twitteraae",
+    "models",
 ]
 
 
@@ -68,6 +73,14 @@ def download_mgphot() -> None:
     print(f"mgphot: {target}")
 
 
+def download_twitteraae() -> None:
+    target = RAW / "twitteraae"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in TWITTERAAE_FILES:
+        urllib.request.urlretrieve(TWITTERAAE_URL.format(name), target / name)
+    print(f"twitteraae: {target}")
+
+
 def download_models() -> None:
     for repo_id in MODELS:
         path = snapshot_download(
@@ -91,6 +104,8 @@ def main() -> None:
             download_kidz_bop()
         elif source == "mgphot":
             download_mgphot()
+        elif source == "twitteraae":
+            download_twitteraae()
         elif source == "models":
             download_models()
 
