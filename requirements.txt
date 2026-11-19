@@ -7,5 +7,6 @@ sentence-transformers
 bert-score
 pronouncing
 pandas
+pyarrow
 tqdm
-kagglehub
+huggingface_hub
