@@ -15,15 +15,21 @@ Output:  outputs/generations/<name>.jsonl, one record per section:
              and the detected words named; the model returns only that line
   stanza     one request per 4-line stanza with a detected word (consecutive chunks of the
              section), detected words named; freer rewrite that keeps flow and rhythm
+  surgical-free, stanza-free  (v8) like surgical / stanza, but lines may be reworded as a
+             whole, keeping meaning, syllables, rhythm and end rhyme; --rhyme makes the model
+             write the rhyme pattern first (end words it rhymes with / letters like AABB)
 
-Candidates: --samples N draws N answers per request (temperature sampling, default 0.8 when
-N > 1) and keeps the best, ParaDeHate-style. A candidate passes when
+Candidates: --samples N draws N answers per request (temperature 1.0 with top-p 0.9 when
+N > 1: top-p drops the unlikely tail, so the higher temperature varies the wording without
+junk) and keeps the best, ParaDeHate-style. A candidate passes when
   - the explicit-word detector finds nothing in it,
   - unbiased-toxic-roberta toxicity < 0.9           (ParaDeHate threshold, radio_ready.scoring)
   - all-distilroberta-v1 cosine to the original >= 0.70 (ParaDeHate threshold)
 Among passing candidates (or all, if none passes) the best breaks the fewest end rhymes
-(end word kept or a shared rhyme key with the original line), then has the smallest total
-syllable difference per line, then the highest similarity. The scorers run on the CPU.
+(end word kept or a shared rhyme key with the original line), keeps every line within one
+syllable, then has the highest similarity x fluency. Fluency is the CoLA acceptability of each
+changed line relative to its original (the ParaDetox fluency model); it catches nonsense such
+as "I should be a sad stuff" and is relative because dialect scores low on both sides. The scorers run on the CPU.
 
 Genius sections reserved for commercial LLMs (rows of data/commercial/commercial_table.csv)
 are skipped. Sections already in the output file are skipped, so an interrupted run resumes.
@@ -50,19 +56,23 @@ from radio_ready import paths
 from radio_ready.commercial import reserved_ids
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.prompts import (
-    PLAIN_VERSION, PROMPT_VERSION, STANZA_VERSION, SURGICAL_CONTEXT, SURGICAL_VERSION,
-    parse_plain, parse_rewrites, parse_stanza, parse_surgical, plain_prompt, single_prompt,
-    stanza_prompt, stanzas, surgical_prompt, target_lines,
+    FREE_VERSION, PLAIN_VERSION, PROMPT_VERSION, STANZA_VERSION, SURGICAL_CONTEXT,
+    SURGICAL_VERSION, model_rhyme, parse_plain, parse_rewrites, parse_stanza, parse_surgical,
+    parse_surgical_free, plain_prompt, single_prompt, stanza_free_prompt, stanza_prompt, stanzas,
+    surgical_free_prompt, surgical_prompt, target_lines,
 )
 from radio_ready.scoring import (
-    SIMILARITY_THRESHOLD, TOXICITY_THRESHOLD, Similarity, Toxicity,
+    SIMILARITY_THRESHOLD, TOXICITY_THRESHOLD, Fluency, Similarity, Toxicity,
 )
 from radio_ready.text import end_word, line_rhyme_keys, syllables
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 VERSIONS = {"annotated": PROMPT_VERSION, "plain": PLAIN_VERSION, "surgical": SURGICAL_VERSION,
-            "stanza": STANZA_VERSION}
-SAMPLING_TEMPERATURE = 0.8
+            "stanza": STANZA_VERSION, "surgical-free": f"{FREE_VERSION}-surgical-free",
+            "stanza-free": f"{FREE_VERSION}-stanza-free"}
+SAMPLING_TEMPERATURE = 1.0
+SAMPLING_TOP_P = 0.9
+MAX_SYLLABLE_DIFF = 1  # per line, before candidates are ranked by similarity x fluency
 
 CPU_EMBEDDINGS_MAP = {"model.embed_tokens": "cpu", "lm_head": "cpu", "model.layers": 0,
                       "model.norm": 0, "model.rotary_emb": 0}
@@ -81,13 +91,13 @@ def load_model(name: str, four_bit: bool, cpu_embeddings: bool):
 
 @torch.no_grad()
 def complete(tok, model, messages: list[dict], samples: int, max_new_tokens: int,
-             temperature: float, thinking: bool) -> list[str]:
+             temperature: float, top_p: float, thinking: bool) -> list[str]:
     """`samples` responses to one chat (one batch: num_return_sequences)."""
     text = tok.apply_chat_template(messages, add_generation_prompt=True,
                                    tokenize=False, enable_thinking=thinking)
     device = getattr(model, "hf_device_map", {}).get("model.embed_tokens", model.device)
     enc = tok(text, return_tensors="pt").to(device)
-    sampling = {"do_sample": True, "temperature": temperature, "top_p": 0.9,
+    sampling = {"do_sample": True, "temperature": temperature, "top_p": top_p,
                 "num_return_sequences": samples} if temperature > 0 else {"do_sample": False}
     out = model.generate(**enc, max_new_tokens=max_new_tokens, **sampling)
     start = enc["input_ids"].shape[1]
@@ -108,6 +118,7 @@ class Selector:
         self.detector = detector
         self.similarity = Similarity(on="cpu")
         self.toxicity = Toxicity(on="cpu")
+        self.fluency = Fluency(on="cpu")
 
     def pick(self, original: list[str], candidates: list[tuple[str, list[str] | None]]):
         """(index of the best candidate or None, scored candidates)."""
@@ -117,6 +128,8 @@ class Selector:
             texts = ["\n".join(lines) for _, lines in usable]
             sims = self.similarity.pairwise(texts, ["\n".join(original)] * len(texts))
             toxs = self.toxicity.score(texts)
+            base = self.fluency.score(list(original))
+            fl = self.fluency.score([line for _, ls in usable for line in ls])
         k = 0
         for raw, lines in candidates:
             if lines is None:
@@ -125,6 +138,11 @@ class Selector:
             text = "\n".join(lines)
             explicit = sorted(set(self.detector.find(text)))
             sim, tox = float(sims[k]), float(toxs[k])
+            n = len(original)
+            # fluency of each changed line relative to its original line: dialect scores low
+            # on both sides, so only a drop counts
+            drop = max([float(base[j] - fl[k * n + j]) for j in range(n)
+                        if lines[j] != original[j]] or [0.0])
             k += 1
             scored.append({
                 "raw": raw, "lines": lines, "explicit": explicit,
@@ -132,18 +150,28 @@ class Selector:
                 "syllable_diff": sum(abs(syllables(a) - syllables(b))
                                      for a, b in zip(original, lines)),
                 "rhymes_broken": sum(not rhymes_with(a, b) for a, b in zip(original, lines)),
+                "max_line_syllable_diff": max(abs(syllables(a) - syllables(b))
+                                              for a, b in zip(original, lines)),
+                "fluency_drop": round(max(drop, 0.0), 3),
                 "passed": not explicit and tox < TOXICITY_THRESHOLD
                           and sim >= SIMILARITY_THRESHOLD,
             })
         ranked = [i for i, c in enumerate(scored) if c["lines"] is not None]
         if not ranked:
             return None, scored
-        best = min(ranked, key=lambda i: (not scored[i]["passed"], scored[i]["rhymes_broken"],
-                                          scored[i]["syllable_diff"], -scored[i]["similarity"]))
+        best = min(ranked, key=lambda i: rank_key(scored[i]))
         return best, scored
 
 
-def units(record: dict, targets: dict, style: str, context: int):
+def rank_key(c: dict) -> tuple:
+    """Lower is better: filters, end rhymes kept, every line within MAX_SYLLABLE_DIFF, then
+    similarity x fluency (ParaDetox-style joint score)."""
+    joint = c["similarity"] * (1 - c["fluency_drop"])
+    return (not c["passed"], c["rhymes_broken"],
+            c["max_line_syllable_diff"] > MAX_SYLLABLE_DIFF, -joint)
+
+
+def units(record: dict, targets: dict, style: str, context: int, rhyme: bool = False):
     """Requests for a section: (start, end, prompt(lines) -> messages, parse(text) -> lines)."""
     n = len(record["lines"])
     if style == "annotated":
@@ -164,6 +192,21 @@ def units(record: dict, targets: dict, style: str, context: int):
             return (i, i + 1, lambda lines: surgical_prompt(record, lines, i, targets[i], context),
                     parse)
         return [one(i) for i in sorted(targets)]
+    if style == "surgical-free":
+        def one_free(i):
+            def parse(raw):
+                line = parse_surgical_free(raw)
+                return None if line is None else [line]
+            return (i, i + 1, lambda lines: surgical_free_prompt(record, lines, i, targets[i],
+                                                                 rhyme, context), parse)
+        return [one_free(i) for i in sorted(targets)]
+    if style == "stanza-free":
+        def chunk_free(start, end):
+            words = sorted({w for t in targets if start <= t < end for w in targets[t]})
+            return (start, end,
+                    lambda lines: stanza_free_prompt(record, lines, start, end, words, rhyme),
+                    lambda raw: parse_stanza(raw, end - start))
+        return [chunk_free(s, e) for s, e in stanzas(record, targets)]
 
     def chunk(start, end):
         words = sorted({w for t in targets if start <= t < end for w in targets[t]})
@@ -175,12 +218,16 @@ def units(record: dict, targets: dict, style: str, context: int):
 def rewrite(tok, model, selector: Selector, record: dict, targets: dict, args) -> dict:
     lines = list(record["lines"])
     raws, scored_units, ok, passed = [], [], True, True
-    for start, end, prompt, parse in units(record, targets, args.style, args.context):
+    for start, end, prompt, parse in units(record, targets, args.style, args.context,
+                                           args.rhyme):
         responses = complete(tok, model, prompt(lines), args.samples, args.max_new_tokens,
-                             args.temperature, args.thinking)
+                             args.temperature, args.top_p, args.thinking)
         best, scored = selector.pick(record["lines"][start:end],
                                      [(r, parse(r)) for r in responses])
-        scored_units.append({"start": start, "end": end, "chosen": best, "candidates": scored})
+        for c in scored:
+            c["model_rhyme"] = model_rhyme(c["raw"]) if args.rhyme else None
+        scored_units.append({"start": start, "end": end, "chosen": best,
+                             "distinct": len({c["raw"] for c in scored}), "candidates": scored})
         if best is None:
             ok = False
             raws.append(responses[0])
@@ -205,6 +252,9 @@ def main() -> None:
     parser.add_argument("--style", choices=list(VERSIONS), default="surgical")
     parser.add_argument("--context", type=int, default=SURGICAL_CONTEXT,
                         help="surgical: lines of context above and below")
+    parser.add_argument("--rhyme", action="store_true",
+                        help="free styles: the model writes the rhyme pattern before its answer")
+    parser.add_argument("--top-p", type=float, default=SAMPLING_TOP_P)
     parser.add_argument("--samples", type=int, default=1,
                         help="candidates per request; the best is kept")
     parser.add_argument("--temperature", type=float, default=None,
@@ -218,7 +268,9 @@ def main() -> None:
     if args.temperature == 0:
         args.samples = 1
     version = VERSIONS[args.style]
-    if args.style == "surgical" and args.context != SURGICAL_CONTEXT:
+    if args.rhyme:
+        version += "-rhyme"
+    if args.style.startswith("surgical") and args.context != SURGICAL_CONTEXT:
         version += f"-ctx{args.context}"
     if args.thinking and args.max_new_tokens == 512:
         args.max_new_tokens = 4096
@@ -254,7 +306,7 @@ def main() -> None:
             f.write(json.dumps({
                 "id": record["id"], "model": args.model, "quantization": None if args.no_4bit
                 else "nf4", "thinking": args.thinking, "temperature": args.temperature,
-                "samples": args.samples, "prompt_version": version, "style": args.style,
+                "top_p": args.top_p, "samples": args.samples, "prompt_version": version, "style": args.style,
                 "targets": sorted(targets), **result,
                 "seconds": round(time.time() - start, 1),
             }, ensure_ascii=False) + "\n")

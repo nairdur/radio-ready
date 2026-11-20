@@ -2,6 +2,8 @@
 
   Similarity  sentence-transformers/all-distilroberta-v1, cosine; threshold 0.70 (Sec. 3.2)
   Toxicity    unitary/unbiased-toxic-roberta, `toxicity` head; threshold 0.9 (Sec. 3.3)
+  Fluency     cointegrated/roberta-large-cola-krishna2020, CoLA acceptability (ParaDetox
+              fluency metric); used relative to the original line when ranking candidates
 
 Evaluation models (LaBSE, s-nlp/roberta_toxicity_classifier) are separate from these.
 """
@@ -11,6 +13,7 @@ import torch
 
 SIMILARITY_MODEL = "sentence-transformers/all-distilroberta-v1"
 TOXICITY_MODEL = "unitary/unbiased-toxic-roberta"
+FLUENCY_MODEL = "cointegrated/roberta-large-cola-krishna2020"  # ParaDetox fluency (FL)
 SIMILARITY_THRESHOLD = 0.70  # ParaDeHate Sec. 3.2
 TOXICITY_THRESHOLD = 0.9  # ParaDeHate Sec. 3.3
 
@@ -56,4 +59,29 @@ class Toxicity:
             ).to(self.model.device)
             logits = self.model(**batch).logits[:, self.index]
             out.append(torch.sigmoid(logits).float().cpu().numpy())
+        return np.concatenate(out) if out else np.array([])
+
+
+class Fluency:
+    """CoLA acceptability probability (the ParaDetox fluency model; label 0 = acceptable).
+
+    Lyrics in dialect score low, so compare a rewrite with its original line, not with a
+    fixed threshold.
+    """
+
+    def __init__(self, model: str = FLUENCY_MODEL, on: str | None = None):
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model)
+        self.model = AutoModelForSequenceClassification.from_pretrained(model).to(device(on)).eval()
+
+    @torch.no_grad()
+    def score(self, texts: list[str], batch_size: int = 64) -> np.ndarray:
+        out = []
+        for i in range(0, len(texts), batch_size):
+            batch = self.tokenizer(
+                texts[i : i + batch_size], padding=True, truncation=True, max_length=128,
+                return_tensors="pt",
+            ).to(self.model.device)
+            out.append(torch.softmax(self.model(**batch).logits, -1)[:, 0].float().cpu().numpy())
         return np.concatenate(out) if out else np.array([])

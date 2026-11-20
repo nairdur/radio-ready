@@ -39,6 +39,7 @@ MODELS = [
     "unitary/unbiased-toxic-roberta",  # toxicity filter, score >= 0.9 is toxic
     "sentence-transformers/LaBSE",  # content-preservation metric
     "s-nlp/roberta_toxicity_classifier",  # style-accuracy metric (ParaDetox classifier)
+    "cointegrated/roberta-large-cola-krishna2020",  # fluency (ParaDetox), candidate ranking
 ]
 
 SOURCES = [

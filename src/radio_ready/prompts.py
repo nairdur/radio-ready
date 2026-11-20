@@ -365,3 +365,96 @@ def parse_stanza(text: str, n: int) -> list[str] | None:
     if set(found) != set(range(n)) or not all(found.values()):
         return None
     return [found[j] for j in range(n)]
+
+
+# --- Freer rewrites (v8): reword whole lines, keep meaning, syllables, rhythm and rhyme ---------
+# surgical-free  one request per detected line (context as in surgical); the line may be
+#                reworded as a whole; its syllable count is given
+# stanza-free    one request per 4-line stanza with a detected word; lines may be reworded
+# With rhyme=True the model first writes the rhyme pattern itself (no computed rhyme letters):
+# for a line, the end words it rhymes with; for a stanza, letters such as AABB.
+
+FREE_VERSION = "v8"
+
+FREE_RULES = """\
+You may reword the whole line, not only swap words, if that sounds better, but keep:
+- the meaning, the attitude and the artist's voice,
+- the rhythm: about the same number of syllables, so it fits the same beat,
+- the end rhyme: the line has to rhyme the way the original does with the lines around it,
+- the slang, dialect, grammar and spelling as the artist writes them.
+Use no word radio would censor, and no sound-alike that would be heard as one."""
+
+SURGICAL_FREE_TEMPLATE = """\
+Lines from "{title}" by {artist}:
+
+{context}
+
+The line marked >>> would get censored on the radio because of: {words}.
+{line}   ({syllables} syllables)
+
+Write the radio edit of that line. {rules}
+
+{answer}"""
+
+SURGICAL_FREE_ANSWER = "Answer with the rewritten line only, without quotes or anything else."
+SURGICAL_FREE_RHYME = """\
+Answer in two rows and nothing else:
+Rhyme: the end words of the lines around it that the marked line rhymes with, or "none"
+then the rewritten line, without quotes."""
+
+STANZA_FREE_TEMPLATE = """\
+{n} lines from "{title}" by {artist}:
+
+{lines}
+
+These words would get censored on the radio: {words}. Write the radio edit of these lines. \
+{rules} Lines without censored words can stay as they are.
+
+{answer}"""
+
+STANZA_FREE_ANSWER = "Answer with the {n} lines, numbered as above, and nothing else."
+STANZA_FREE_RHYME = """\
+Answer with the rhyme pattern of the original lines on one row (for example "Rhyme: AABB"), \
+then the {n} lines numbered as above, following the same pattern, and nothing else."""
+
+
+def surgical_free_prompt(record: dict, lines: list[str], i: int, words: list[str],
+                         rhyme: bool, span: int = SURGICAL_CONTEXT) -> list[dict]:
+    from radio_ready.text import syllables
+
+    song = record.get("context_before", []) + lines + record.get("context_after", [])
+    at = len(record.get("context_before", [])) + i
+    window = range(max(0, at - span), min(len(song), at + span + 1))
+    context = "\n".join((">>> " if j == at else "    ") + song[j] for j in window)
+    user = SURGICAL_FREE_TEMPLATE.format(
+        title=record["title"], artist=record["artist"], context=context,
+        words=", ".join(words), line=song[at], syllables=syllables(song[at]), rules=FREE_RULES,
+        answer=SURGICAL_FREE_RHYME if rhyme else SURGICAL_FREE_ANSWER)
+    return [{"role": "system", "content": PLAIN_SYSTEM}, {"role": "user", "content": user}]
+
+
+def parse_surgical_free(text: str) -> str | None:
+    """The rewritten line, skipping a leading "Rhyme:" row."""
+    rows = [r for r in text.strip().splitlines()
+            if r.strip() and not r.strip().lower().lstrip("*").startswith("rhyme")]
+    return parse_surgical("\n".join(rows)) if rows else None
+
+
+def stanza_free_prompt(record: dict, lines: list[str], start: int, end: int,
+                       words: list[str], rhyme: bool) -> list[dict]:
+    n = end - start
+    rows = "\n".join(f"{j + 1}. {lines[start + j]}" for j in range(n))
+    answer = (STANZA_FREE_RHYME if rhyme else STANZA_FREE_ANSWER).format(n=n)
+    user = STANZA_FREE_TEMPLATE.format(n=n, title=record["title"], artist=record["artist"],
+                                       lines=rows, words=", ".join(words), rules=FREE_RULES,
+                                       answer=answer)
+    return [{"role": "system", "content": PLAIN_SYSTEM}, {"role": "user", "content": user}]
+
+
+def model_rhyme(text: str) -> str | None:
+    """The "Rhyme: ..." row of an answer, if any."""
+    for r in text.splitlines():
+        r = r.strip().lstrip("*").strip()
+        if r.lower().startswith("rhyme"):
+            return r.split(":", 1)[-1].strip().strip("*").strip() or None
+    return None

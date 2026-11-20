@@ -296,12 +296,18 @@ with `--cpu-embeddings`. Default input: the Kidz Bop pilot
 | --- | --- | --- |
 | `surgical` (default) | one per line with a detected word, 4 lines above and below as context | detected words |
 | `stanza` | one per 4-line stanza with a detected word; freer rewrite keeping flow and rhythm | detected words |
+| `surgical-free` | as `surgical`, but the whole line may be reworded | detected words, syllable count |
+| `stanza-free` | as `stanza`, lines may be reworded | detected words |
 | `plain` | whole section; model decides what radio would censor | none |
 | `annotated` | whole section with syllable counts, rhyme letters, REWRITE marks | all |
 
 `--samples N` draws N candidates per request (temperature 0.8) and keeps the best with the
 ParaDeHate filters: no detected explicit word, toxicity < 0.9, similarity to the original
-≥ 0.70; ties are broken by the smallest syllable difference, then the highest similarity.
+≥ 0.70. Among those, the best keeps the end rhymes, keeps every line within one syllable, and
+has the highest similarity × fluency (CoLA acceptability of each changed line relative to the
+original, the ParaDetox fluency model; it catches nonsense like "I should be a sad stuff").
+`surgical-free` and `stanza-free` allow whole lines to be reworded; with `--rhyme` the model
+first writes the rhyme pattern itself.
 
 ```bash
 python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings --style stanza --samples 5
@@ -349,6 +355,7 @@ similarity, AAE delta. Outputs in `outputs/comparison/<name>/`: `scores.csv`, `s
 | --- | --- | --- |
 | `sentence-transformers/all-distilroberta-v1` | similarity filter | cosine ≥ 0.70 (ParaDeHate) |
 | `unitary/unbiased-toxic-roberta` | toxicity filter | ≥ 0.9 (ParaDeHate) |
+| `cointegrated/roberta-large-cola-krishna2020` | fluency, candidate ranking (relative to the original line) | — |
 | `sentence-transformers/LaBSE` | meaning-preservation metric | — |
 | `s-nlp/roberta_toxicity_classifier` | clean-output metric | — |
 
