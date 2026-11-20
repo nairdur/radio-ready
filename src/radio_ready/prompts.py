@@ -230,3 +230,91 @@ def parse_batch(text: str) -> dict[str, str]:
         elif current is not None:
             sections[current].append(raw)
     return {k: "\n".join(v) for k, v in sections.items()}
+
+
+# --- Unannotated prompts: no rhyme letters, syllable counts or explicit-word marks -------------
+# plain:     the whole section; the model decides which lines radio would censor and returns
+#            the full section
+# surgical:  one request per detected line, with SURGICAL_CONTEXT lines above and below; the
+#            model returns only that line. Earlier rewrites in the section replace their
+#            originals in later contexts.
+
+PLAIN_VERSION = "v6-plain"
+SURGICAL_VERSION = "v6-surgical"
+SURGICAL_CONTEXT = 4
+
+PLAIN_SYSTEM = (
+    "You are a professional lyricist who writes radio edits of songs. You change only what "
+    "radio would censor and leave everything else exactly as written."
+)
+
+FOCUS = (
+    "keep the rhyme, the syllable count, the end rhyme, the lyricism and the flow, so it "
+    "sounds like the same song. Do not clean up slang, dialect, grammar or spelling"
+)
+
+PLAIN_TEMPLATE = """\
+Here is a section of "{title}" by {artist}:
+
+{lines}
+
+Rewrite only the lines with words that would get censored on the radio. Leave every other line \
+exactly as it is. In the lines you rewrite, change as few words as possible and {focus}.
+
+Answer with the full section: all {n} lines in order, numbered as above ("1. ..."), with \
+unchanged lines copied exactly. Do not add anything else."""
+
+SURGICAL_TEMPLATE = """\
+Lines from "{title}" by {artist}:
+
+{context}
+
+The line marked >>> would get censored on the radio:
+{line}
+
+Rewrite that line only. Change as few words as possible and {focus}. It has to fit with the \
+lines around it.
+
+Answer with the rewritten line only, without quotes or anything else."""
+
+
+def plain_prompt(record: dict) -> list[dict]:
+    lines = "\n".join(f"{i + 1}. {l}" for i, l in enumerate(record["lines"]))
+    user = PLAIN_TEMPLATE.format(title=record["title"], artist=record["artist"], lines=lines,
+                                 n=len(record["lines"]), focus=FOCUS)
+    return [{"role": "system", "content": PLAIN_SYSTEM}, {"role": "user", "content": user}]
+
+
+def parse_plain(text: str, record: dict) -> dict[int, str] | None:
+    """{line index: rewrite} for the lines the model changed; None unless every line is
+    returned exactly once by number."""
+    n = len(record["lines"])
+    found = {}
+    for raw in text.splitlines():
+        m = LINE.match(raw.strip().strip("`"))
+        if m and 1 <= int(m.group(1)) <= n:
+            found.setdefault(int(m.group(1)) - 1, clean_response_line(m.group(2)))
+    if set(found) != set(range(n)) or not all(found.values()):
+        return None
+    return {i: t for i, t in found.items() if t != record["lines"][i].strip()}
+
+
+def surgical_prompt(record: dict, lines: list[str], i: int,
+                    span: int = SURGICAL_CONTEXT) -> list[dict]:
+    """Chat messages for line i of a section, given the section's current lines."""
+    song = record.get("context_before", []) + lines + record.get("context_after", [])
+    at = len(record.get("context_before", [])) + i
+    window = range(max(0, at - span), min(len(song), at + span + 1))
+    context = "\n".join((">>> " if j == at else "    ") + song[j] for j in window)
+    user = SURGICAL_TEMPLATE.format(title=record["title"], artist=record["artist"],
+                                    context=context, line=song[at], focus=FOCUS)
+    return [{"role": "system", "content": PLAIN_SYSTEM}, {"role": "user", "content": user}]
+
+
+def parse_surgical(text: str) -> str | None:
+    rows = [r for r in (clean_response_line(r.strip().strip("`\"'")) for r in
+                        text.strip().splitlines()) if r]
+    if not rows:
+        return None
+    line = re.sub(r"^>>>\s*", "", rows[0]).strip().strip("\"'")
+    return line or None

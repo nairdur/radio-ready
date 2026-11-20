@@ -6,8 +6,15 @@ Output:  outputs/generations/<name>.jsonl, one record per section:
          rewrites ({line index: text}, targets plus any neighbor lines the model changed),
          lines (the merged section; None if a target line is missing), valid, seconds
 
-Target and neighbor lines are defined in radio_ready.prompts; the prompt shows the whole
-section as context.
+--style picks the prompt (radio_ready.prompts):
+  annotated  (default, v5) whole section with syllable counts, rhyme letters and REWRITE marks
+             on detected lines; the model returns the lines it changed
+  plain      whole section with no annotations; the model decides which lines radio would
+             censor and returns the full section
+  surgical   one request per detected line with 4 lines above and below (--context); the model
+             returns only that line
+Target lines (explicit words found by radio_ready.explicit) select sections for every style;
+plain outputs are valid with any changed lines (compare checks what is left explicit).
 
 Genius sections reserved for commercial LLMs (rows of data/commercial/commercial_table.csv)
 are skipped.
@@ -18,7 +25,7 @@ the 4-bit transformer layers on the GPU and puts the unquantized input embedding
 head on the CPU. Qwen3 models: --thinking enables thinking mode; the <think> block is
 dropped from the response. The output name defaults to <model>-<quant>_<input>_<prompt version>.
 
-Run:  python -m radio_ready.generate [--model NAME] [--input FILE] [--limit N]
+Run:  python -m radio_ready.generate [--model NAME] [--input FILE] [--limit N] [--style plain]
       python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings
 """
 
@@ -33,7 +40,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from radio_ready import paths
 from radio_ready.commercial import reserved_ids
 from radio_ready.explicit import ExplicitDetector
-from radio_ready.prompts import PROMPT_VERSION, merge, parse_rewrites, single_prompt, target_lines
+from radio_ready.prompts import (
+    PLAIN_VERSION, PROMPT_VERSION, SURGICAL_CONTEXT, SURGICAL_VERSION, merge, parse_plain,
+    parse_rewrites, parse_surgical, plain_prompt, single_prompt, surgical_prompt, target_lines,
+)
+
+VERSIONS = {"annotated": PROMPT_VERSION, "plain": PLAIN_VERSION, "surgical": SURGICAL_VERSION}
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 
@@ -54,9 +66,9 @@ def load_model(name: str, four_bit: bool, cpu_embeddings: bool):
 
 
 @torch.no_grad()
-def rewrite(tok, model, record: dict, targets: dict, max_new_tokens: int,
-            temperature: float, thinking: bool) -> str:
-    text = tok.apply_chat_template(single_prompt(record, targets), add_generation_prompt=True,
+def complete(tok, model, messages: list[dict], max_new_tokens: int, temperature: float,
+             thinking: bool) -> str:
+    text = tok.apply_chat_template(messages, add_generation_prompt=True,
                                    tokenize=False, enable_thinking=thinking)
     device = getattr(model, "hf_device_map", {}).get("model.embed_tokens", model.device)
     enc = tok(text, return_tensors="pt").to(device)
@@ -65,6 +77,26 @@ def rewrite(tok, model, record: dict, targets: dict, max_new_tokens: int,
     out = model.generate(**enc, max_new_tokens=max_new_tokens, **sampling)
     text = tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
     return text.split("</think>")[-1].strip()
+
+
+def rewrite(tok, model, record: dict, targets: dict, style: str, context: int,
+            **gen) -> tuple[str, dict[int, str] | None]:
+    """(raw response, {line index: rewrite} or None if unusable)."""
+    if style == "annotated":
+        raw = complete(tok, model, single_prompt(record, targets), **gen)
+        return raw, parse_rewrites(raw, record, targets)
+    if style == "plain":
+        raw = complete(tok, model, plain_prompt(record), **gen)
+        return raw, parse_plain(raw, record)
+    lines, raws, rewrites = list(record["lines"]), [], {}
+    for i in sorted(targets):
+        raw = complete(tok, model, surgical_prompt(record, lines, i, context), **gen)
+        raws.append(f"{i + 1}. {raw}")
+        line = parse_surgical(raw)
+        if line is None:
+            return "\n".join(raws), None
+        lines[i] = rewrites[i] = line
+    return "\n".join(raws), rewrites
 
 
 def main() -> None:
@@ -76,18 +108,24 @@ def main() -> None:
     parser.add_argument("--cpu-embeddings", action="store_true",
                         help="embeddings and output head on the CPU, layers on the GPU")
     parser.add_argument("--thinking", action="store_true", help="Qwen3 thinking mode")
+    parser.add_argument("--style", choices=list(VERSIONS), default="annotated")
+    parser.add_argument("--context", type=int, default=SURGICAL_CONTEXT,
+                        help="surgical: lines of context above and below")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
+    version = VERSIONS[args.style]
+    if args.style == "surgical" and args.context != SURGICAL_CONTEXT:
+        version += f"-ctx{args.context}"
     if args.thinking and args.max_new_tokens == 512:
         args.max_new_tokens = 4096
     if args.name is None:
         quant = "bf16" if args.no_4bit else "4bit"
         source = Path(args.input).stem
         args.name = (f"{args.model.split('/')[-1].lower()}-{quant}"
-                     f"{'-thinking' if args.thinking else ''}_{source}_{PROMPT_VERSION}")
+                     f"{'-thinking' if args.thinking else ''}_{source}_{version}")
     records = [json.loads(l) for l in open(args.input, encoding="utf-8")]
     skip = reserved_ids()
     out = paths.GENERATIONS_DIR / f"{args.name}.jsonl"
@@ -107,15 +145,15 @@ def main() -> None:
             if not targets:
                 print(f"[{i}/{len(todo)}] {record['id']} skipped: no line has a detected word")
                 continue
-            raw = rewrite(tok, model, record, targets, args.max_new_tokens, args.temperature,
-                          args.thinking)
-            rewrites = parse_rewrites(raw, record, targets)
+            raw, rewrites = rewrite(tok, model, record, targets, args.style, args.context,
+                                    max_new_tokens=args.max_new_tokens,
+                                    temperature=args.temperature, thinking=args.thinking)
             lines = merge(record, rewrites) if rewrites is not None else None
             valid += lines is not None
             f.write(json.dumps({
                 "id": record["id"], "model": args.model, "quantization": None if args.no_4bit
                 else "nf4", "thinking": args.thinking, "temperature": args.temperature,
-                "prompt_version": PROMPT_VERSION,
+                "prompt_version": version, "style": args.style,
                 "targets": sorted(targets), "raw": raw,
                 "rewrites": {str(k): v for k, v in (rewrites or {}).items()},
                 "lines": lines, "valid": lines is not None,

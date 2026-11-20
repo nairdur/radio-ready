@@ -1,24 +1,26 @@
-"""Commercial-LLM rewrites (ChatGPT, Claude, Gemini, ...) by manual copy-paste, via one table.
+"""Commercial-LLM rewrites (ChatGPT, Claude, Gemini, ...) by manual copy-paste.
 
-data/commercial/commercial_table.csv has one row per section:
-  id, source, artist, title, prompt_version   identify the section
-  prompt                                      the complete prompt: copy this cell into the LLM
-  output_<model>                              paste that LLM's answer here (one column per model)
+data/commercial/prompt.txt   one generic prompt for every section: paste it at the start of a
+                             chat (then send sections one by one) or in front of each section
+data/commercial/commercial_table.csv, one row per section:
+  id, source        identify the section
+  section           "Title" by Artist, then the section lines: copy this cell into the LLM
+  output_<model>    paste that LLM's answer here (one column per model)
 The prompt asks for the whole section on one line, lines separated by " / ", so an answer
-pastes into a single cell. A numbered multi-line answer ("4. ...") is accepted too.
+pastes into a single cell. A numbered multi-line answer ("1. ...") is accepted too.
 
 Rows: every section of the Kidz Bop pilot (a comparison set the local model also rewrites)
-plus --genius-sections Genius sections chosen by a hash of the section id. The Genius rows are
-reserved for commercial models and skipped by radio_ready.generate.
+plus --genius-sections Genius sections chosen by a hash of the section id, all with at least
+one detected explicit word. The Genius rows are reserved for commercial models and skipped by
+radio_ready.generate. The prompt never marks lines: the model decides what radio would censor.
 
 Running this module (also the `commercial` pipeline step) only adds what is missing: new rows,
-and an output column for each model in --models. Existing rows, prompts and pasted answers are
-never changed, so it is safe to re-run while filling the table (close it in Excel first, which
-locks the file).
+and an output column for each model in --models. Existing rows and pasted answers are never
+changed, so it is safe to re-run while filling the table (close it in Excel first, which locks
+the file). prompt.txt is rewritten every run.
 
 load_rewrites() reads the filled cells for radio_ready.compare. An answer is valid when it has
-the same number of lines as the section and every target line (explicit word) was changed;
-changes outside the target lines and their neighbors are ignored (original kept).
+the same number of lines as the section; compare scores what changed and what is left explicit.
 
 Run:  python -m radio_ready.commercial [--genius-sections 50] [--models chatgpt claude gemini]
 """
@@ -31,39 +33,36 @@ import re
 
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
-from radio_ready.prompts import (
-    INSTRUCTIONS, PROMPT_VERSION, SYSTEM_PROMPT, merge, neighbor_lines, parse_rewrites,
-    section_text, target_lines,
-)
+from radio_ready.prompts import clean_response_line, merge, target_lines
 
 TABLE = paths.COMMERCIAL_DIR / "commercial_table.csv"
+PROMPT_TXT = paths.COMMERCIAL_DIR / "prompt.txt"
 SEP = " / "
 OUTPUT_PREFIX = "output_"
-BASE_COLUMNS = ["id", "source", "artist", "title", "prompt_version", "prompt"]
+BASE_COLUMNS = ["id", "source", "section"]
 DEFAULT_MODELS = ["chatgpt", "claude", "gemini"]
 SOURCES = {
     "kidzbop_pilot": paths.KIDZBOP_DIR / "pilot.jsonl",
     "genius": paths.GENIUS_SECTIONS_JSONL,
 }
+NUMBERED = re.compile(r"^\s*(\d+)[.)]\s?(.*)$")
 
-TABLE_PROMPT = """\
-{system}
+PROMPT = f"""\
+You are a professional lyricist who writes radio edits of songs. I will send you sections of \
+songs, each starting with the title and artist, then one lyric line per row.
 
-Write the radio edit of this section of "{title}" by {artist}.
+For each section, rewrite only the lines with words that would get censored on the radio. Leave \
+every other line exactly as it is. In the lines you rewrite, change as few words as possible and \
+keep the rhyme, the syllable count, the end rhyme, the lyricism and the flow, so it sounds like \
+the same song. Do not clean up slang, dialect, grammar or spelling.
 
-{instructions}
-
-{section}
-
-Answer with the full section on a single line: all {n} lines in order, separated by " / ", \
-with every line you did not change copied exactly. Do not add line numbers, brackets, quotes \
-or anything else."""
+Answer with the full section on a single line: every lyric line in order (not the title line), \
+separated by "{SEP}", with unchanged lines copied exactly. Do not add line numbers, quotes or \
+anything else."""
 
 
-def prompt_for(record: dict, targets: dict[int, list[str]]) -> str:
-    return TABLE_PROMPT.format(system=SYSTEM_PROMPT, title=record["title"],
-                               artist=record["artist"], instructions=INSTRUCTIONS,
-                               section=section_text(record, targets), n=len(record["lines"]))
+def section_cell(record: dict) -> str:
+    return f'"{record["title"]}" by {record["artist"]}\n' + "\n".join(record["lines"])
 
 
 def hash_rank(section_id: str) -> int:
@@ -100,14 +99,9 @@ def build(genius_sections: int, models: list[str]) -> None:
 
     added = 0
     for source, record in candidates:
-        if record["id"] in have:
+        if record["id"] in have or not target_lines(record, detector):
             continue
-        targets = target_lines(record, detector)
-        if not targets:
-            continue
-        rows.append({"id": record["id"], "source": source, "artist": record["artist"],
-                     "title": record["title"], "prompt_version": PROMPT_VERSION,
-                     "prompt": prompt_for(record, targets)})
+        rows.append({"id": record["id"], "source": source, "section": section_cell(record)})
         have.add(record["id"])
         added += 1
 
@@ -117,6 +111,7 @@ def build(genius_sections: int, models: list[str]) -> None:
     fieldnames = BASE_COLUMNS + extra + outputs
 
     paths.COMMERCIAL_DIR.mkdir(parents=True, exist_ok=True)
+    PROMPT_TXT.write_text(PROMPT + "\n", encoding="utf-8")
     tmp = TABLE.with_suffix(".csv.tmp")
     with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
@@ -126,49 +121,47 @@ def build(genius_sections: int, models: list[str]) -> None:
 
     filled = {c: sum(bool(r.get(c, "").strip()) for r in rows) for c in outputs}
     print(f"table: {len(rows)} sections ({added} added), filled per model: {filled}")
-    print(f"file: {TABLE}")
+    print(f"files: {TABLE}\n       {PROMPT_TXT}")
 
 
-def parse_answer(answer: str, record: dict, targets) -> dict[int, str] | None:
-    """{line index: rewrite} from a one-line " / " answer or a numbered multi-line answer."""
+def parse_answer(answer: str, record: dict) -> dict[int, str] | None:
+    """{line index: rewrite} for the changed lines of a one-line " / " answer or a numbered
+    multi-line answer; None unless it has exactly the section's number of lines."""
     text = answer.strip().strip("`").strip()
-    if re.match(r"^\d+[.)]\s", text):  # numbered lines ("4. ..."), one or several
-        numbered = parse_rewrites(text, record, targets)
-        if numbered is not None:
-            return numbered
-    lines = [l.strip() for l in " ".join(text.splitlines()).split(SEP.strip())]
-    if len(lines) != len(record["lines"]):
+    rows = [r for r in text.splitlines() if r.strip()]
+    if rows and all(NUMBERED.match(r) for r in rows):
+        lines = [clean_response_line(NUMBERED.match(r).group(2)) for r in rows]
+    else:
+        lines = [l.strip() for l in " ".join(rows).split(SEP.strip())]
+    if len(lines) == len(record["lines"]) + 1 and lines[0].strip('"').startswith(record["title"]):
+        lines = lines[1:]  # title line echoed back
+    if len(lines) != len(record["lines"]) or not all(lines):
         return None
-    allowed = set(targets) | set(neighbor_lines(record, targets))
-    changed = {i: t for i, (t, o) in enumerate(zip(lines, record["lines"]))
-               if t and t != o.strip() and i in allowed}
-    return changed if set(targets) <= set(changed) else None
+    return {i: t for i, (t, o) in enumerate(zip(lines, record["lines"])) if t != o.strip()}
 
 
 def load_rewrites(ids: set[str] | None = None) -> dict[str, dict[str, list[str]]]:
     """{model: {section id: rewritten lines}} for every valid pasted answer."""
     records = {r["id"]: r for p in SOURCES.values() for r in read_jsonl(p)}
     columns, rows = read_table()
-    detector = ExplicitDetector()
     systems: dict[str, dict[str, list[str]]] = {}
     invalid: dict[str, list[str]] = {}
     for row in rows:
         record = records.get(row["id"])
         if record is None or (ids is not None and row["id"] not in ids):
             continue
-        targets = target_lines(record, detector)
         for col in columns:
             if not col.startswith(OUTPUT_PREFIX) or not row.get(col, "").strip():
                 continue
             model = col[len(OUTPUT_PREFIX):]
-            rewrites = parse_answer(row[col], record, targets)
+            rewrites = parse_answer(row[col], record)
             if rewrites is None:
                 invalid.setdefault(model, []).append(row["id"])
             else:
                 systems.setdefault(model, {})[row["id"]] = merge(record, rewrites)
     for model, bad in invalid.items():
-        print(f"commercial {model}: {len(bad)} invalid answers "
-              f"(wrong line count or a target line unchanged): {', '.join(bad)}")
+        print(f"commercial {model}: {len(bad)} invalid answers (wrong line count): "
+              f"{', '.join(bad)}")
     return systems
 
 

@@ -296,21 +296,24 @@ reserved for commercial LLMs are skipped.
 
 ### Commercial LLMs (copy-paste)
 
-The pipeline's `commercial` step keeps one table, `data/commercial/commercial_table.csv`,
-with a row per section: every Kidz Bop pilot section plus 50 Genius sections chosen by a hash of
-the section id (the local model never rewrites those Genius sections).
+The pipeline's `commercial` step writes one generic prompt, `data/commercial/prompt.txt`, and
+one table, `data/commercial/commercial_table.csv`, with a row per section: every Kidz Bop pilot
+section plus 50 Genius sections chosen by a hash of the section id (the local model never
+rewrites those Genius sections). The prompt does not mark lines, syllables or rhyme: the model
+decides what radio would censor.
 
-To fill it, open the table in Excel or Google Sheets and, row by row:
-1. copy the `prompt` cell into the LLM,
-2. paste its answer into that model's column (`output_chatgpt`, `output_claude`,
+To fill it:
+1. paste `prompt.txt` at the start of a chat (or in front of each section),
+2. for each row, copy the `section` cell into the chat,
+3. paste the answer into that model's column (`output_chatgpt`, `output_claude`,
    `output_gemini`; rename a column to the exact model, e.g. `output_gemini-2.5-pro`, or add
    one).
 
 The prompt asks for the whole section on one line with lines separated by ` / `, so each
 answer fits in one cell. No import step: `compare` reads the filled cells directly and reports
-answers it cannot use (wrong number of lines, or an explicit line left unchanged). Re-running
-the step only adds new rows and model columns and never changes filled cells; close the file in
-Excel first. Options: `python -m radio_ready.commercial --genius-sections 100 --models gpt-5`.
+answers it cannot use (wrong number of lines). Re-running the step only adds new rows and model
+columns and never changes filled cells; close the file in Excel first. Options:
+`python -m radio_ready.commercial --genius-sections 100 --models gpt-5`.
 
 ### Side-by-side comparison
 
