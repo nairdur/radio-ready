@@ -1,4 +1,4 @@
-"""Lyric text utilities: normalization, ad-libs, syllables, stress, end rhyme."""
+"""Lyric text utilities: normalization, ad-libs, syllables, stress, end rhyme, rhyme scheme."""
 
 import re
 from functools import lru_cache
@@ -46,9 +46,14 @@ def split_adlibs(line: str) -> tuple[str, list[str]]:
     return main, adlibs
 
 
+SPELLINGS = {"em": "um", "ya": "yuh", "tryna": "trynna", "gon": "gone", "lil": "little"}
+
+
 def _lookup_word(word: str) -> str:
-    """Map slang spellings to dictionary forms: runnin' -> running."""
+    """Map slang spellings to dictionary forms: runnin' -> running, 'em -> um."""
     w = word.lower().strip("'")
+    if w in SPELLINGS and pronouncing.phones_for_word(SPELLINGS[w]):
+        return SPELLINGS[w]
     if word.lower().endswith("in'") or (w.endswith("in") and not pronouncing.phones_for_word(w)):
         if pronouncing.phones_for_word(w + "g"):
             return w + "g"
@@ -95,22 +100,112 @@ def rhyme_key(word: str) -> str:
     return w[groups[-1].start():] if groups else w
 
 
+# Line-final words that are sung filler, not the rhyme: "...what I get, yeah".
+FILLERS = {"yeah", "yea", "yeh", "yuh", "uh", "uhh", "huh", "oh", "ohh", "ooh", "ay", "ayy",
+           "aye", "ey", "hey", "woah", "whoa", "mhm", "mm", "mmm", "hmm", "ha", "haha", "skrrt",
+           "brr", "la", "na", "nah"}
+# Unstressed words that can trail the rhyming word: "love me" rhymes with "money".
+WEAK = {"me", "it", "em", "'em", "them", "him", "her", "us", "a", "the", "of", "to", "for",
+        "in", "on", "with", "and"}
+# Vowels sung alike (cot-caught merger).
+VOWEL_MERGE = {"AO": "AA"}
+# Unstressed vowels that are all sung as a schwa.
+REDUCED = {"AH", "IH", "UH", "EH"}
+
+
+def _phones(word: str) -> list[str] | None:
+    found = pronouncing.phones_for_word(_lookup_word(word))
+    return found[0].split() if found else None
+
+
+def _vowel(phone: str) -> str:
+    v = re.sub(r"\d", "", phone)
+    return VOWEL_MERGE.get(v, v)
+
+
+def _tail_key(phones: list[str]) -> str:
+    """Stressed vowel of the rhyme plus its last vowel if the rhyme has more syllables:
+    money/love me -> AH-IY, problems/solve 'em -> AA-AH, heart/dark -> AA."""
+    vowels = [p for p in phones if p[-1].isdigit()]
+    if not vowels:
+        return ""
+    stressed = [i for i, p in enumerate(vowels) if p[-1] in "12"]
+    tail = vowels[stressed[-1]:] if stressed else vowels[-1:]
+    key = _vowel(tail[0])
+    if len(tail) == 1:
+        return key
+    end = _vowel(tail[-1])
+    if tail[-1].endswith("0") and end in REDUCED:  # schwa: riches/bitches
+        end = "AH"
+    return key + "-" + end
+
+
+def rhyme_words(line: str) -> list[str]:
+    """Words of a line without trailing fillers (all words if the line is only filler)."""
+    found = [w.lower() for w in words(line)]
+    while len(found) > 1 and found[-1].strip("'") in FILLERS:
+        found.pop()
+    return found
+
+
 @lru_cache(maxsize=200_000)
-def assonance_key(word: str) -> str:
-    """Vowel of the last stressed syllable; matches slant rhymes common in rap (shots/notch)."""
-    phones = pronouncing.phones_for_word(_lookup_word(word))
-    if phones:
-        part = pronouncing.rhyming_part(phones[0]).split()
-        return re.sub(r"\d", "", part[0]) if part else ""
-    groups = VOWEL_GROUP.findall(word.lower())
-    return groups[-1] if groups else ""
+def line_rhyme_keys(line: str) -> tuple[str, ...]:
+    """Candidate end-rhyme keys of a line; two lines rhyme when they share one.
+
+    One key from the last word, and one from the last stressed word with a weak tail of up
+    to two unstressed words ("love me", "faking it", "all of 'em"). Unknown words fall back
+    to their last spelled vowel group.
+    """
+    found = rhyme_words(line)
+    if not found:
+        return ()
+    keys = []
+    last = _phones(found[-1])
+    if last is None:
+        groups = VOWEL_GROUP.findall(found[-1])
+        return ("~" + groups[-1],) if groups else ()
+    keys.append(_tail_key(last))
+    j = len(found) - 1
+    while j > 0 and found[j] in WEAK and len(found) - j <= 2:
+        j -= 1
+    if j < len(found) - 1 and found[j] not in WEAK:
+        tail = [_phones(w) for w in found[j:]]
+        if all(tail):
+            weak = [re.sub(r"\d", "0", p) for t in tail[1:] for p in t]
+            keys.append(_tail_key(tail[0] + weak))
+    return tuple(dict.fromkeys(k for k in keys if k))
+
+
+def rhyme_scheme(lines: list[str]) -> str:
+    """Letters per line, lines sharing a letter rhyme (union of shared keys); unrhymed lines
+    get their own letter."""
+    keys = [line_rhyme_keys(l) for l in lines]
+    parent = list(range(len(lines)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first: dict[str, int] = {}
+    for i, ks in enumerate(keys):
+        for k in ks:
+            if k in first:
+                parent[find(i)] = find(first[k])
+            else:
+                first[k] = i
+    letters: dict[int, str] = {}
+    return "".join(letters.setdefault(find(i), chr(ord("A") + len(letters) % 26))
+                   for i in range(len(lines)))
 
 
 def end_word(line: str) -> str:
-    found = words(line)
-    return found[-1].lower() if found else ""
+    found = rhyme_words(line)
+    return found[-1] if found else ""
 
 
 def end_rhyme_kept(original: str, rewrite: str) -> bool:
+    """End word (fillers skipped) kept or a perfect rhyme."""
     a, b = end_word(original), end_word(rewrite)
     return bool(a and b) and (a == b or rhyme_key(a) == rhyme_key(b))

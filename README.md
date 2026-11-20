@@ -166,7 +166,7 @@ Example: Tink, "Ride It", Verse 3 (Dej Loaf).
 | `lines` | lyric lines to rewrite, ad-libs removed | `["Put that pussy on Versace plates", "Make me feel some type of way", ...]` |
 | `syllables` | syllables per line | `[9, 7, 8, 9, 9, 9, 9, 9]` |
 | `stress` | CMU stress per line (1 primary, 2 secondary, 0 unstressed, ? unknown word) | `["111010101", "1111111", "??111101", ...]` |
-| `rhyme_scheme` | end-rhyme letter per line, by stressed vowel | `"AAAAAAAA"` |
+| `rhyme_scheme` | end-rhyme letter per line: stressed vowel plus the final vowel of multi-syllable rhymes, trailing fillers ("yeah") skipped, weak tails ("love me") joined | `"AAAAAAAA"` |
 | `adlibs` | parenthetical ad-libs removed from the lines | `["Right, um", "Type of way", "Wide awake", ...]` |
 | `explicit_words` | detected explicit tokens, one per occurrence | `["pussy", "pussy", "fuck", "bitch"]` |
 | `eligible_sections_in_song` | eligible sections in this song | `1` |

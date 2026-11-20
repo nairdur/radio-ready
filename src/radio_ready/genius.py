@@ -35,7 +35,7 @@ import pyarrow.parquet as pq
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.text import (
-    HOMOGLYPHS, assonance_key, end_word, normalize, split_adlibs, stress, syllables,
+    HOMOGLYPHS, normalize, rhyme_scheme, split_adlibs, stress, syllables,
 )
 
 HEADER = re.compile(r"^\[([^\]]*)\]$")
@@ -138,17 +138,6 @@ def dedupe(sections: list[Section]) -> list[Section]:
         seen[key] = s
         out.append(s)
     return out
-
-
-def rhyme_scheme(lines: list[str]) -> str:
-    letters: dict[str, str] = {}
-    scheme = []
-    for line in lines:
-        key = assonance_key(end_word(line)) if end_word(line) else ""
-        if key not in letters:
-            letters[key] = chr(ord("A") + len(letters) % 26)
-        scheme.append(letters[key])
-    return "".join(scheme)
 
 
 FEATURE = re.compile(r"\s*[\(\[]?\b(?:feat|ft|featuring|with)\b\.?.*$", re.IGNORECASE)
