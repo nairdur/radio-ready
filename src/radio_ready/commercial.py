@@ -124,13 +124,26 @@ def build(genius_sections: int, models: list[str]) -> None:
     print(f"files: {TABLE}\n       {PROMPT_TXT}")
 
 
+ROW_JUNK = re.compile(r'"\s*\n\s*[0-9a-f]{12}"?\s*$')  # a stray quote that swallowed the next row
+
+
+def clean_answer(answer: str) -> str:
+    """Pasted answer without code fences, an echoed title row or a swallowed next-row id."""
+    text = ROW_JUNK.sub("", answer.strip()).strip().strip("`").strip()
+    rows = [r.rstrip() for r in text.splitlines() if r.strip()]
+    if rows and re.match(r'^".+" by .+$', rows[0].strip()):
+        rows = rows[1:]
+    return "\n".join(rows)
+
+
 def parse_answer(answer: str, record: dict) -> dict[int, str] | None:
     """{line index: rewrite} for the changed lines of a one-line " / " answer or a numbered
     multi-line answer; None unless it has exactly the section's number of lines."""
-    text = answer.strip().strip("`").strip()
-    rows = [r for r in text.splitlines() if r.strip()]
+    rows = clean_answer(answer).splitlines()
     if rows and all(NUMBERED.match(r) for r in rows):
         lines = [clean_response_line(NUMBERED.match(r).group(2)) for r in rows]
+    elif len(rows) > 1 and SEP.strip() not in " ".join(rows):
+        lines = [r.strip() for r in rows]  # one lyric line per row
     else:
         lines = [l.strip() for l in " ".join(rows).split(SEP.strip())]
     if len(lines) == len(record["lines"]) + 1 and lines[0].strip('"').startswith(record["title"]):
