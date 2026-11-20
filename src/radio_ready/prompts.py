@@ -235,13 +235,18 @@ def parse_batch(text: str) -> dict[str, str]:
 # --- Unannotated prompts: no rhyme letters, syllable counts or explicit-word marks -------------
 # plain:     the whole section; the model decides which lines radio would censor and returns
 #            the full section
-# surgical:  one request per detected line, with SURGICAL_CONTEXT lines above and below; the
-#            model returns only that line. Earlier rewrites in the section replace their
-#            originals in later contexts.
+# surgical:  one request per detected line, with SURGICAL_CONTEXT lines above and below and the
+#            detected words named; the model returns only that line. Earlier rewrites in the
+#            section replace their originals in later contexts.
+# stanza:    the section split into consecutive STANZA_SIZE-line stanzas (as on the regexp-test
+#            branch); one request per stanza with a detected word, detected words named; a
+#            freer rewrite of the whole stanza that keeps flow and rhythm.
 
 PLAIN_VERSION = "v6-plain"
-SURGICAL_VERSION = "v6-surgical"
+SURGICAL_VERSION = "v7-surgical"
+STANZA_VERSION = "v7-stanza"
 SURGICAL_CONTEXT = 4
+STANZA_SIZE = 4
 
 PLAIN_SYSTEM = (
     "You are a professional lyricist who writes radio edits of songs. You change only what "
@@ -272,8 +277,8 @@ Lines from "{title}" by {artist}:
 The line marked >>> would get censored on the radio:
 {line}
 
-Rewrite that line only. Change as few words as possible and {focus}. It has to fit with the \
-lines around it.
+Rewrite that line only. Replace these words: {words}, and any other word radio would censor. \
+Change as few words as possible and {focus}. It has to fit with the lines around it.
 
 Answer with the rewritten line only, without quotes or anything else."""
 
@@ -299,7 +304,7 @@ def parse_plain(text: str, record: dict) -> dict[int, str] | None:
     return {i: t for i, t in found.items() if t != record["lines"][i].strip()}
 
 
-def surgical_prompt(record: dict, lines: list[str], i: int,
+def surgical_prompt(record: dict, lines: list[str], i: int, words: list[str],
                     span: int = SURGICAL_CONTEXT) -> list[dict]:
     """Chat messages for line i of a section, given the section's current lines."""
     song = record.get("context_before", []) + lines + record.get("context_after", [])
@@ -307,7 +312,8 @@ def surgical_prompt(record: dict, lines: list[str], i: int,
     window = range(max(0, at - span), min(len(song), at + span + 1))
     context = "\n".join((">>> " if j == at else "    ") + song[j] for j in window)
     user = SURGICAL_TEMPLATE.format(title=record["title"], artist=record["artist"],
-                                    context=context, line=song[at], focus=FOCUS)
+                                    context=context, line=song[at], words=", ".join(words),
+                                    focus=FOCUS)
     return [{"role": "system", "content": PLAIN_SYSTEM}, {"role": "user", "content": user}]
 
 
@@ -318,3 +324,44 @@ def parse_surgical(text: str) -> str | None:
         return None
     line = re.sub(r"^>>>\s*", "", rows[0]).strip().strip("\"'")
     return line or None
+
+
+STANZA_TEMPLATE = """\
+{n} lines from "{title}" by {artist}:
+
+{lines}
+
+These words would get censored on the radio: {words}. Rewrite the lines so that none of them, \
+and no other word radio would censor, is left. You may rephrase freely, but keep the flow and \
+rhythm: the same number of syllables per line as far as possible, the same end rhymes, the \
+same meaning and the artist's style. Do not clean up slang, dialect, grammar or spelling. \
+Lines without censored words can stay as they are.
+
+Answer with the {n} lines, numbered as above, and nothing else."""
+
+
+def stanzas(record: dict, targets) -> list[tuple[int, int]]:
+    """(start, end) of the consecutive STANZA_SIZE-line stanzas that contain a target line."""
+    n = len(record["lines"])
+    return [(s, min(s + STANZA_SIZE, n)) for s in range(0, n, STANZA_SIZE)
+            if any(s <= t < s + STANZA_SIZE for t in targets)]
+
+
+def stanza_prompt(record: dict, lines: list[str], start: int, end: int,
+                  words: list[str]) -> list[dict]:
+    rows = "\n".join(f"{j + 1}. {lines[start + j]}" for j in range(end - start))
+    user = STANZA_TEMPLATE.format(n=end - start, title=record["title"], artist=record["artist"],
+                                  lines=rows, words=", ".join(words))
+    return [{"role": "system", "content": PLAIN_SYSTEM}, {"role": "user", "content": user}]
+
+
+def parse_stanza(text: str, n: int) -> list[str] | None:
+    """The n numbered lines of a stanza answer, or None."""
+    found = {}
+    for raw in text.splitlines():
+        m = LINE.match(raw.strip().strip("`"))
+        if m and 1 <= int(m.group(1)) <= n:
+            found.setdefault(int(m.group(1)) - 1, clean_response_line(m.group(2)))
+    if set(found) != set(range(n)) or not all(found.values()):
+        return None
+    return [found[j] for j in range(n)]

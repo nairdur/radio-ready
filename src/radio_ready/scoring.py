@@ -15,8 +15,8 @@ SIMILARITY_THRESHOLD = 0.70  # ParaDeHate Sec. 3.2
 TOXICITY_THRESHOLD = 0.9  # ParaDeHate Sec. 3.3
 
 
-def device() -> str:
-    name = "cuda" if torch.cuda.is_available() else "cpu"
+def device(name: str | None = None) -> str:
+    name = name or ("cuda" if torch.cuda.is_available() else "cpu")
     if name == "cuda":
         print(f"scoring on GPU: {torch.cuda.get_device_name(0)}", flush=True)
     else:
@@ -25,10 +25,10 @@ def device() -> str:
 
 
 class Similarity:
-    def __init__(self, model: str = SIMILARITY_MODEL):
+    def __init__(self, model: str = SIMILARITY_MODEL, on: str | None = None):
         from sentence_transformers import SentenceTransformer
 
-        self.model = SentenceTransformer(model, device=device())
+        self.model = SentenceTransformer(model, device=device(on))
 
     def pairwise(self, a: list[str], b: list[str], batch_size: int = 64) -> np.ndarray:
         ea = self.model.encode(a, batch_size=batch_size, normalize_embeddings=True)
@@ -39,11 +39,11 @@ class Similarity:
 class Toxicity:
     """Probability of the 'toxicity' head of unbiased-toxic-roberta (multi-label, sigmoid)."""
 
-    def __init__(self, model: str = TOXICITY_MODEL):
+    def __init__(self, model: str = TOXICITY_MODEL, on: str | None = None):
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(model)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model).to(device()).eval()
+        self.model = AutoModelForSequenceClassification.from_pretrained(model).to(device(on)).eval()
         self.index = self.model.config.label2id["toxicity"]
 
     @torch.no_grad()

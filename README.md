@@ -288,11 +288,28 @@ censored or misspelled forms, sound-alikes or innuendo.
 python -m radio_ready.generate
 ```
 
-Qwen2.5-7B-Instruct loaded in 4-bit (NF4, bitsandbytes) to fit an 8 GB GPU, greedy decoding.
-Default input: the Kidz Bop pilot (`data/processed/kidzbop/pilot.jsonl`). Output:
-`outputs/generations/<name>.jsonl` with the raw response, the target lines, their rewrites and
-the merged section (`valid` = every target line returned). Interrupted runs resume. Sections
-reserved for commercial LLMs are skipped.
+Qwen2.5-7B-Instruct loaded in 4-bit (NF4, bitsandbytes) to fit an 8 GB GPU; Qwen3-14B fits
+with `--cpu-embeddings`. Default input: the Kidz Bop pilot
+(`data/processed/kidzbop/pilot.jsonl`). Prompt styles (`--style`):
+
+| Style | Request | Hints |
+| --- | --- | --- |
+| `surgical` (default) | one per line with a detected word, 4 lines above and below as context | detected words |
+| `stanza` | one per 4-line stanza with a detected word; freer rewrite keeping flow and rhythm | detected words |
+| `plain` | whole section; model decides what radio would censor | none |
+| `annotated` | whole section with syllable counts, rhyme letters, REWRITE marks | all |
+
+`--samples N` draws N candidates per request (temperature 0.8) and keeps the best with the
+ParaDeHate filters: no detected explicit word, toxicity < 0.9, similarity to the original
+≥ 0.70; ties are broken by the smallest syllable difference, then the highest similarity.
+
+```bash
+python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings --style stanza --samples 5
+```
+
+Output: `outputs/generations/<name>.jsonl` with the merged section, the changed lines, whether
+the chosen candidates passed the filters, and every candidate with its scores. Interrupted runs
+resume. Sections reserved for commercial LLMs are skipped.
 
 ### Commercial LLMs (copy-paste)
 

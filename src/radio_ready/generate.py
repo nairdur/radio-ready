@@ -2,31 +2,40 @@
 
 Inputs:  a sections JSONL (default data/processed/kidzbop/pilot.jsonl)
 Output:  outputs/generations/<name>.jsonl, one record per section:
-         id, model, prompt_version, targets (line indexes that must be rewritten), raw,
-         rewrites ({line index: text}, targets plus any neighbor lines the model changed),
-         lines (the merged section; None if a target line is missing), valid, seconds
+         id, model, prompt_version, style, samples, temperature,
+         targets (line indexes with a detected explicit word), raw (chosen responses),
+         rewrites ({line index: text} for changed lines), lines (the merged section; None if
+         a request gave no usable answer), valid, passed (every chosen candidate passed the
+         filters), units (per request: line span and every candidate with its scores), seconds
 
 --style picks the prompt (radio_ready.prompts):
-  annotated  (default, v5) whole section with syllable counts, rhyme letters and REWRITE marks
-             on detected lines; the model returns the lines it changed
-  plain      whole section with no annotations; the model decides which lines radio would
-             censor and returns the full section
-  surgical   one request per detected line with 4 lines above and below (--context); the model
-             returns only that line
-Target lines (explicit words found by radio_ready.explicit) select sections for every style;
-plain outputs are valid with any changed lines (compare checks what is left explicit).
+  annotated  (v5) whole section with syllable counts, rhyme letters and REWRITE marks
+  plain      whole section with no annotations; the model decides what radio would censor
+  surgical   (default) one request per detected line with 4 lines above and below (--context)
+             and the detected words named; the model returns only that line
+  stanza     one request per 4-line stanza with a detected word (consecutive chunks of the
+             section), detected words named; freer rewrite that keeps flow and rhythm
+
+Candidates: --samples N draws N answers per request (temperature sampling, default 0.8 when
+N > 1) and keeps the best, ParaDeHate-style. A candidate passes when
+  - the explicit-word detector finds nothing in it,
+  - unbiased-toxic-roberta toxicity < 0.9           (ParaDeHate threshold, radio_ready.scoring)
+  - all-distilroberta-v1 cosine to the original >= 0.70 (ParaDeHate threshold)
+Among passing candidates (or all, if none passes) the best breaks the fewest end rhymes
+(end word kept or a shared rhyme key with the original line), then has the smallest total
+syllable difference per line, then the highest similarity. The scorers run on the CPU.
 
 Genius sections reserved for commercial LLMs (rows of data/commercial/commercial_table.csv)
-are skipped.
-Sections already in the output file are skipped, so an interrupted run can be resumed.
+are skipped. Sections already in the output file are skipped, so an interrupted run resumes.
 
 Models slightly larger than the GPU (e.g. Qwen3-14B in 4-bit on 8 GB): --cpu-embeddings keeps
 the 4-bit transformer layers on the GPU and puts the unquantized input embeddings and output
 head on the CPU. Qwen3 models: --thinking enables thinking mode; the <think> block is
-dropped from the response. The output name defaults to <model>-<quant>_<input>_<prompt version>.
+dropped from the response. The output name defaults to
+<model>-<quant>_<input>_<prompt version>[_n<samples>].
 
-Run:  python -m radio_ready.generate [--model NAME] [--input FILE] [--limit N] [--style plain]
-      python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings
+Run:  python -m radio_ready.generate [--model NAME] [--input FILE] [--limit N]
+      python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings --style stanza --samples 5
 """
 
 import argparse
@@ -41,14 +50,19 @@ from radio_ready import paths
 from radio_ready.commercial import reserved_ids
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.prompts import (
-    PLAIN_VERSION, PROMPT_VERSION, SURGICAL_CONTEXT, SURGICAL_VERSION, merge, parse_plain,
-    parse_rewrites, parse_surgical, plain_prompt, single_prompt, surgical_prompt, target_lines,
+    PLAIN_VERSION, PROMPT_VERSION, STANZA_VERSION, SURGICAL_CONTEXT, SURGICAL_VERSION,
+    parse_plain, parse_rewrites, parse_stanza, parse_surgical, plain_prompt, single_prompt,
+    stanza_prompt, stanzas, surgical_prompt, target_lines,
 )
-
-VERSIONS = {"annotated": PROMPT_VERSION, "plain": PLAIN_VERSION, "surgical": SURGICAL_VERSION}
+from radio_ready.scoring import (
+    SIMILARITY_THRESHOLD, TOXICITY_THRESHOLD, Similarity, Toxicity,
+)
+from radio_ready.text import end_word, line_rhyme_keys, syllables
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-
+VERSIONS = {"annotated": PROMPT_VERSION, "plain": PLAIN_VERSION, "surgical": SURGICAL_VERSION,
+            "stanza": STANZA_VERSION}
+SAMPLING_TEMPERATURE = 0.8
 
 CPU_EMBEDDINGS_MAP = {"model.embed_tokens": "cpu", "lm_head": "cpu", "model.layers": 0,
                       "model.norm": 0, "model.rotary_emb": 0}
@@ -66,37 +80,117 @@ def load_model(name: str, four_bit: bool, cpu_embeddings: bool):
 
 
 @torch.no_grad()
-def complete(tok, model, messages: list[dict], max_new_tokens: int, temperature: float,
-             thinking: bool) -> str:
+def complete(tok, model, messages: list[dict], samples: int, max_new_tokens: int,
+             temperature: float, thinking: bool) -> list[str]:
+    """`samples` responses to one chat (one batch: num_return_sequences)."""
     text = tok.apply_chat_template(messages, add_generation_prompt=True,
                                    tokenize=False, enable_thinking=thinking)
     device = getattr(model, "hf_device_map", {}).get("model.embed_tokens", model.device)
     enc = tok(text, return_tensors="pt").to(device)
-    sampling = {"do_sample": True, "temperature": temperature, "top_p": 0.9} \
-        if temperature > 0 else {"do_sample": False}
+    sampling = {"do_sample": True, "temperature": temperature, "top_p": 0.9,
+                "num_return_sequences": samples} if temperature > 0 else {"do_sample": False}
     out = model.generate(**enc, max_new_tokens=max_new_tokens, **sampling)
-    text = tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
-    return text.split("</think>")[-1].strip()
+    start = enc["input_ids"].shape[1]
+    return [tok.decode(o[start:], skip_special_tokens=True).split("</think>")[-1].strip()
+            for o in out]
 
 
-def rewrite(tok, model, record: dict, targets: dict, style: str, context: int,
-            **gen) -> tuple[str, dict[int, str] | None]:
-    """(raw response, {line index: rewrite} or None if unusable)."""
+def rhymes_with(original: str, rewrite: str) -> bool:
+    """End word kept, or the rewritten line shares an end-rhyme key with the original."""
+    return (end_word(original) == end_word(rewrite)
+            or bool(set(line_rhyme_keys(original)) & set(line_rhyme_keys(rewrite))))
+
+
+class Selector:
+    """Scores candidates for one span of lines and picks the best (ParaDeHate filters)."""
+
+    def __init__(self, detector: ExplicitDetector):
+        self.detector = detector
+        self.similarity = Similarity(on="cpu")
+        self.toxicity = Toxicity(on="cpu")
+
+    def pick(self, original: list[str], candidates: list[tuple[str, list[str] | None]]):
+        """(index of the best candidate or None, scored candidates)."""
+        scored = []
+        usable = [(raw, lines) for raw, lines in candidates if lines is not None]
+        if usable:
+            texts = ["\n".join(lines) for _, lines in usable]
+            sims = self.similarity.pairwise(texts, ["\n".join(original)] * len(texts))
+            toxs = self.toxicity.score(texts)
+        k = 0
+        for raw, lines in candidates:
+            if lines is None:
+                scored.append({"raw": raw, "lines": None, "passed": False})
+                continue
+            text = "\n".join(lines)
+            explicit = sorted(set(self.detector.find(text)))
+            sim, tox = float(sims[k]), float(toxs[k])
+            k += 1
+            scored.append({
+                "raw": raw, "lines": lines, "explicit": explicit,
+                "toxicity": round(tox, 3), "similarity": round(sim, 3),
+                "syllable_diff": sum(abs(syllables(a) - syllables(b))
+                                     for a, b in zip(original, lines)),
+                "rhymes_broken": sum(not rhymes_with(a, b) for a, b in zip(original, lines)),
+                "passed": not explicit and tox < TOXICITY_THRESHOLD
+                          and sim >= SIMILARITY_THRESHOLD,
+            })
+        ranked = [i for i, c in enumerate(scored) if c["lines"] is not None]
+        if not ranked:
+            return None, scored
+        best = min(ranked, key=lambda i: (not scored[i]["passed"], scored[i]["rhymes_broken"],
+                                          scored[i]["syllable_diff"], -scored[i]["similarity"]))
+        return best, scored
+
+
+def units(record: dict, targets: dict, style: str, context: int):
+    """Requests for a section: (start, end, prompt(lines) -> messages, parse(text) -> lines)."""
+    n = len(record["lines"])
     if style == "annotated":
-        raw = complete(tok, model, single_prompt(record, targets), **gen)
-        return raw, parse_rewrites(raw, record, targets)
+        def parse(raw):
+            rw = parse_rewrites(raw, record, targets)
+            return None if rw is None else [rw.get(i, l) for i, l in enumerate(record["lines"])]
+        return [(0, n, lambda lines: single_prompt(record, targets), parse)]
     if style == "plain":
-        raw = complete(tok, model, plain_prompt(record), **gen)
-        return raw, parse_plain(raw, record)
-    lines, raws, rewrites = list(record["lines"]), [], {}
-    for i in sorted(targets):
-        raw = complete(tok, model, surgical_prompt(record, lines, i, context), **gen)
-        raws.append(f"{i + 1}. {raw}")
-        line = parse_surgical(raw)
-        if line is None:
-            return "\n".join(raws), None
-        lines[i] = rewrites[i] = line
-    return "\n".join(raws), rewrites
+        def parse(raw):
+            rw = parse_plain(raw, record)
+            return None if rw is None else [rw.get(i, l) for i, l in enumerate(record["lines"])]
+        return [(0, n, lambda lines: plain_prompt(record), parse)]
+    if style == "surgical":
+        def one(i):
+            def parse(raw):
+                line = parse_surgical(raw)
+                return None if line is None else [line]
+            return (i, i + 1, lambda lines: surgical_prompt(record, lines, i, targets[i], context),
+                    parse)
+        return [one(i) for i in sorted(targets)]
+
+    def chunk(start, end):
+        words = sorted({w for t in targets if start <= t < end for w in targets[t]})
+        return (start, end, lambda lines: stanza_prompt(record, lines, start, end, words),
+                lambda raw: parse_stanza(raw, end - start))
+    return [chunk(s, e) for s, e in stanzas(record, targets)]
+
+
+def rewrite(tok, model, selector: Selector, record: dict, targets: dict, args) -> dict:
+    lines = list(record["lines"])
+    raws, scored_units, ok, passed = [], [], True, True
+    for start, end, prompt, parse in units(record, targets, args.style, args.context):
+        responses = complete(tok, model, prompt(lines), args.samples, args.max_new_tokens,
+                             args.temperature, args.thinking)
+        best, scored = selector.pick(record["lines"][start:end],
+                                     [(r, parse(r)) for r in responses])
+        scored_units.append({"start": start, "end": end, "chosen": best, "candidates": scored})
+        if best is None:
+            ok = False
+            raws.append(responses[0])
+            continue
+        lines[start:end] = scored[best]["lines"]
+        raws.append(scored[best]["raw"])
+        passed &= scored[best]["passed"]
+    rewrites = {str(i): l for i, (l, o) in enumerate(zip(lines, record["lines"])) if l != o}
+    return {"raw": "\n\n".join(raws), "rewrites": rewrites, "lines": lines if ok else None,
+            "valid": ok, "passed": ok and passed, "units": scored_units}
 
 
 def main() -> None:
@@ -108,14 +202,21 @@ def main() -> None:
     parser.add_argument("--cpu-embeddings", action="store_true",
                         help="embeddings and output head on the CPU, layers on the GPU")
     parser.add_argument("--thinking", action="store_true", help="Qwen3 thinking mode")
-    parser.add_argument("--style", choices=list(VERSIONS), default="annotated")
+    parser.add_argument("--style", choices=list(VERSIONS), default="surgical")
     parser.add_argument("--context", type=int, default=SURGICAL_CONTEXT,
                         help="surgical: lines of context above and below")
-    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--samples", type=int, default=1,
+                        help="candidates per request; the best is kept")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help=f"default 0 (greedy) for 1 sample, {SAMPLING_TEMPERATURE} for more")
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
+    if args.temperature is None:
+        args.temperature = SAMPLING_TEMPERATURE if args.samples > 1 else 0.0
+    if args.temperature == 0:
+        args.samples = 1
     version = VERSIONS[args.style]
     if args.style == "surgical" and args.context != SURGICAL_CONTEXT:
         version += f"-ctx{args.context}"
@@ -125,7 +226,8 @@ def main() -> None:
         quant = "bf16" if args.no_4bit else "4bit"
         source = Path(args.input).stem
         args.name = (f"{args.model.split('/')[-1].lower()}-{quant}"
-                     f"{'-thinking' if args.thinking else ''}_{source}_{version}")
+                     f"{'-thinking' if args.thinking else ''}_{source}_{version}"
+                     f"{f'_n{args.samples}' if args.samples > 1 else ''}")
     records = [json.loads(l) for l in open(args.input, encoding="utf-8")]
     skip = reserved_ids()
     out = paths.GENERATIONS_DIR / f"{args.name}.jsonl"
@@ -136,8 +238,9 @@ def main() -> None:
           f"{sum(r['id'] in skip for r in records)}, to generate: {len(todo)}")
 
     detector = ExplicitDetector()
+    selector = Selector(detector)
     tok, model = load_model(args.model, not args.no_4bit, args.cpu_embeddings)
-    valid = 0
+    valid = passed = 0
     with open(out, "a", encoding="utf-8") as f:
         for i, record in enumerate(todo, start=1):
             start = time.time()
@@ -145,24 +248,20 @@ def main() -> None:
             if not targets:
                 print(f"[{i}/{len(todo)}] {record['id']} skipped: no line has a detected word")
                 continue
-            raw, rewrites = rewrite(tok, model, record, targets, args.style, args.context,
-                                    max_new_tokens=args.max_new_tokens,
-                                    temperature=args.temperature, thinking=args.thinking)
-            lines = merge(record, rewrites) if rewrites is not None else None
-            valid += lines is not None
+            result = rewrite(tok, model, selector, record, targets, args)
+            valid += result["valid"]
+            passed += result["passed"]
             f.write(json.dumps({
                 "id": record["id"], "model": args.model, "quantization": None if args.no_4bit
                 else "nf4", "thinking": args.thinking, "temperature": args.temperature,
-                "prompt_version": version, "style": args.style,
-                "targets": sorted(targets), "raw": raw,
-                "rewrites": {str(k): v for k, v in (rewrites or {}).items()},
-                "lines": lines, "valid": lines is not None,
+                "samples": args.samples, "prompt_version": version, "style": args.style,
+                "targets": sorted(targets), **result,
                 "seconds": round(time.time() - start, 1),
             }, ensure_ascii=False) + "\n")
             f.flush()
-            print(f"[{i}/{len(todo)}] {record['id']} valid={lines is not None} "
-                  f"{time.time() - start:.1f}s", flush=True)
-    print(f"valid: {valid}/{len(todo)}, output: {out}")
+            print(f"[{i}/{len(todo)}] {record['id']} valid={result['valid']} "
+                  f"passed={result['passed']} {time.time() - start:.1f}s", flush=True)
+    print(f"valid: {valid}/{len(todo)}, passed filters: {passed}/{len(todo)}, output: {out}")
 
 
 if __name__ == "__main__":
