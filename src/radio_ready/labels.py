@@ -1,9 +1,8 @@
 """Join song-level explicit labels onto Genius lyrics.
 
 Label sources:
-  spotify  Spotify API `explicit` flag (maharshipandya/spotify-tracks-dataset). A song is
-           explicit if any of its versions is; clean radio edits share the title, so `any`
-           avoids labelling the explicit original as clean.
+  spotify  Spotify API `explicit` flag (maharshipandya/spotify-tracks-dataset); a song is
+           explicit if any of its versions is flagged.
   mgphot   Music Genome Project analysts' "Explicit Lyrics" score (0-1) for Billboard Hot 100
            songs (MGPHot, TISMIR 2025). Used as the gold evaluation set:
            explicit if score >= MGPHOT_EXPLICIT, clean if score == 0, otherwise ambiguous.
@@ -12,8 +11,10 @@ Songs are matched on a normalized primary-artist + title key. Matched songs are 
 artist into train/val/test (60/20/20, as in Fell et al. 2019); songs with an MGPHot label form
 the `gold` split and are never trained on.
 
+Inputs:  data/raw/genius, data/raw/spotify-tracks, data/raw/mgphot
+Output:  data/processed/labels/songs.parquet (lyrics, labels, split)
+
 Run:  python -m radio_ready.labels
-Writes data/processed/labels/songs.parquet (lyrics + labels + split).
 """
 
 import hashlib

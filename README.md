@@ -1,26 +1,38 @@
 # RadioReady
 
-Clean "radio edits" of explicit song lyrics that keep the original meaning, syllable count, and
+Clean radio edits of explicit song lyrics that keep the original meaning, syllable count, and
 end rhyme.
 
 ## Approach
 
-1. **Data**: pair explicit stanzas with clean rewrites, using human edits plus LLM-generated
-   ones filtered for cleanliness, meaning, syllables, and rhyme.
-2. **SFT**: LoRA fine-tune Qwen2.5-1.5B-Instruct on general detox, then on lyric pairs
-   conditioned on syllable and rhyme control tokens.
-3. **DPO**: rank sampled rewrites with the constraint scorers and train on preference pairs.
+1. **Data**: explicit lyric sections from Genius for synthetic rewriting; sections of Kidz Bop
+   songs as a separate side-by-side and evaluation set.
+2. **SFT**: LoRA fine-tune Qwen2.5-1.5B-Instruct on ParaDetox, then on lyric pairs conditioned
+   on syllable and rhyme control tokens.
+3. **DPO**: preference pairs ranked by the constraint scorers.
 4. **Evaluation**: explicit-content removal, semantic similarity, syllable and rhyme accuracy,
-   and human ratings.
+   human ratings.
 
 ## Layout
 
 ```
-annotations/ human-edited files (committed, never regenerated)
-data/        datasets (gitignored)
-notebooks/   exploration
-outputs/     checkpoints, generations, metrics (gitignored)
-src/         project code (radio_ready package)
+annotations/  human-edited files (committed)
+data/         raw/, artifacts/, processed/ (gitignored)
+notebooks/    exploration
+outputs/      models and metrics (gitignored)
+src/radio_ready/
+  download.py         raw data and models
+  labels.py           song-level explicit labels
+  learned_lexicon.py  learned explicit-word list + human vetting
+  classifier.py       section-level explicit classifier
+  explicit.py         explicit-word detector used by the pipeline
+  kidzbop.py          Kidz Bop song sections and word stats
+  genius.py           Genius cleaning, sections, sampling
+  aae.py              AAE vernacular proportion
+  scoring.py          similarity and toxicity models
+  text.py             normalization, syllables, stress, rhyme
+  paths.py            file locations
+  llm_judgment/       LLM-judged artifacts, not used by the pipeline
 ```
 
 ## Setup
@@ -37,128 +49,158 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Data
+## Pipeline
 
-Download everything into `data/raw/` and pre-cache the scoring models:
+Run from the repository root, in order.
 
-```bash
-python -m radio_ready.download all
-```
+| Step | Command | Inputs | Outputs |
+| --- | --- | --- | --- |
+| 1 | `python -m radio_ready.download all` | — | `data/raw/*`, model cache |
+| 2 | `python -m radio_ready.labels` | Genius, Spotify, MGPHot | `data/processed/labels/songs.parquet` |
+| 3 | `python -m radio_ready.learned_lexicon` | labels, Surge, vetting | `data/artifacts/learned_explicit_words.csv`, `lexicon_metrics.json` |
+| 4 | `python -m radio_ready.classifier` | labels | `outputs/explicit_classifier/` |
+| 5 | `python -m radio_ready.kidzbop` | Kidz Bop, Genius, step 3 | `data/artifacts/kidzbop_*.csv`, `data/processed/kidzbop/{sections,pilot}.jsonl` |
+| 6 | `python -m radio_ready.genius` | Genius, Kidz Bop, step 3 | `data/processed/genius_sections.jsonl` |
+| 7 | `python -m radio_ready.aae` | step 6, TwitterAAE | adds `aae_proportion` to step 6 output |
 
-Or pick sources: `paradetox`, `kidz-bop`, `genius`, `spotify-tracks`, `surge-profanity`,
-`mgphot`, `twitteraae`, `models`.
+### 2. Labels
 
-| Source | Folder | Use |
-| --- | --- | --- |
-| [ParaDetox](https://huggingface.co/datasets/s-nlp/paradetox) | `data/raw/paradetox` | general detox SFT |
-| [The Pudding: Kidz Bop censored lyrics](https://github.com/the-pudding/data/tree/master/kidz-bop) | `data/raw/kidz-bop` | word substitutions, explicit-word list, DPO negatives |
-| [Genius lyrics (cleaned)](https://huggingface.co/datasets/theelderemo/genius-lyrics-cleaned) (~2.4 GB) | `data/raw/genius` | explicit stanzas for synthetic rewrites |
-| [Spotify tracks](https://huggingface.co/datasets/maharshipandya/spotify-tracks-dataset) | `data/raw/spotify-tracks` | Spotify API `explicit` flag per track (training labels) |
-| [MGPHot](https://zenodo.org/records/15372063) (TISMIR 2025, CC BY-NC-ND) | `data/raw/mgphot` | expert "Explicit Lyrics" scores, Billboard Hot 100 (gold labels) |
-| [Surge AI Obscenity List](https://huggingface.co/datasets/mmathys/profanity) (MIT) | `data/raw/surge-profanity` | 1.6k profanities with human severity ratings |
-| [TwitterAAE](https://github.com/slanglab/twitteraae) (EMNLP 2016, MIT) | `data/raw/twitteraae` | dialect model (count tables only) for AAE-level tags |
+Song-level labels joined onto Genius by normalized primary artist + title:
 
-Scoring models (Hugging Face cache), following ParaDeHate:
+- Spotify `explicit` flag: a song is explicit if any version is flagged. Split by artist
+  60/20/20 into train/val/test.
+- MGPHot "Explicit Lyrics" score: explicit if ≥ 0.6, clean if 0. These songs form the `gold`
+  split and are not trained on.
 
-| Model | Use |
+### 3. Learned lexicon and vetting
+
+Explicit-word list learned from the labels (Fell et al. 2019):
+`importance(w) = rate(w | explicit songs) / rate(w | clean songs)`. The lookup size is tuned on
+val. `lexicon_metrics.json` reports lookup and logistic regression on test and gold, with the
+Surge list (severity ≥ 2) as baseline.
+
+`annotations/explicit_word_vetting.csv` holds a `verdict` per word:
+
+| Verdict | Effect |
 | --- | --- |
-| `sentence-transformers/all-distilroberta-v1` | similarity filter (cosine ≥ 0.70) |
-| `unitary/unbiased-toxic-roberta` | toxicity filter (≥ 0.9 is toxic) |
-| `sentence-transformers/LaBSE` | meaning-preservation metric |
-| `s-nlp/roberta_toxicity_classifier` | clean-output metric |
+| `not_explicit` | removed before ranking |
+| `explicit` | always included |
+| `unsure` / blank | none |
 
-## Data preparation
+`--add-to-vetting N` appends unvetted words from the top N with a blank verdict. Existing rows
+are never changed.
 
-Run in order after downloading:
+### 4. Classifier
 
-```bash
-python -m radio_ready.lexicon
-```
+DistilRoBERTa trained on one random section per song with the song's Spotify label; a song's
+score is the max over its sections; the threshold is tuned on val.
 
-```bash
-python -m radio_ready.kidzbop
-```
+### Explicit-word detection
 
-```bash
-python -m radio_ready.genius
-```
+`explicit.py` is used by steps 5 and 6. A text is explicit if any token is in the word list,
+or it contains a censored token (`f*ck`). Word lists (`--detector`):
 
-1. **`lexicon`** builds `data/artifacts/explicit_words.csv` from the Kidz Bop censored words,
-   sorted by frequency, with per-word stats (rows, songs, artists, cut rate) and the most
-   common replacements found by diffing original vs. Kidz Bop lines
-   (`data/artifacts/kidzbop_substitutions.csv`). Each word has a tier: `strong` (bleeped on
-   radio, used for detection), `mild` (damn, hell), or `kb_only` (censored only by Kidz Bop).
-2. **`kidzbop`** compiles Kidz Bop edits into **DPO negatives** (bad radio edits to train
-   against, never targets). Each rewrite gets rule-based failure tags: `cut` (line deleted),
-   `over_censored` (original had nothing radio-explicit), `still_explicit`, `meaning_drift`
-   (similarity < 0.70), `syllable_break` (±2 or more), `rhyme_break`. `over_censored` rows are
-   complete pairs (chosen = unchanged original); the rest are marked `needs_chosen` for a
-   synthetic rewrite. Each line is located in its Genius song (fuzzy title + artist match) to
-   attach the surrounding section as prompt context. Splits are by song. Output:
-   `data/processed/kidzbop/dpo_negatives.jsonl`; all rows and scores in `pairs_scored.csv`.
-3. **`genius`** cleans lyrics (section headers → metadata, ad-libs separated, scrape junk and
-   repeated choruses removed), finds sections with strong explicit words, and picks one random
-   song per artist and one random explicit section from it. Kidz Bop songs are excluded
-   (same fuzzy match), so negatives and synthetic data never share a song.
-   Output: `data/processed/genius_sections.jsonl`, with per-line syllables, stress, rhyme
-   scheme, and surrounding context, ready for synthetic rewriting.
+- `learned` (default): lookup words from step 3 after vetting, plus words marked `explicit`
+- `surge`: Surge AI Obscenity List entries with severity ≥ 2 (excludes e.g. "shit" 1.2,
+  "bitch" 1.4, "ass" 1.0)
 
-## Explicit-content labels and detection
+### 5. Kidz Bop songs
 
-```bash
-python -m radio_ready.labels
-```
+A separate dataset, not part of the Genius sample. Uses: 7B rewrites for side-by-side human
+ranking against the Kidz Bop version, evaluation of the trained model, and a pilot subset for
+testing 7B generation before running it on all Genius sections.
 
-```bash
-python -m radio_ready.learned_lexicon
-```
+Each Kidz Bop song is matched to Genius (fuzzy title + artist), each Kidz Bop line is located in
+the cleaned sections (line similarity ≥ 0.75, `--min-line-match`), and every eligible explicit
+section (same rules as step 6) is kept. Sections with an edited line also get `kidz_bop_lines`
+(the section with the Kidz Bop lines in place) and `kidz_bop_edits` (position, original, Kidz
+Bop line, cut flag, matched bad words). Splits are by song. `pilot` marks a seeded sample of
+sections with an edit (`--pilot-size`, default 50).
 
-```bash
-python -m radio_ready.classifier
-```
+Outputs: `data/processed/kidzbop/sections.jsonl`, `data/processed/kidzbop/pilot.jsonl`.
 
-1. **`labels`** joins song-level labels onto Genius by normalized artist + title: the Spotify
-   API flag (explicit if any version is) and MGPHot expert scores (explicit ≥ 0.6, clean = 0).
-   Spotify and MGPHot agree on 98% of the songs that have both. Spotify-labelled songs are
-   split by artist 60/20/20; MGPHot songs form a held-out `gold` split.
-   Output: `data/processed/labels/songs.parquet`.
-2. **`learned_lexicon`** learns explicit words from the labels as in Fell et al. (RANLP 2019):
-   importance = rate in explicit songs / rate in clean songs. It reports dictionary lookup and
-   regression against a Surge-list baseline (`data/artifacts/lexicon_metrics.json`). The
-   learned list partly captures rap slang (genre confound), so it is an analysis artifact,
-   not the section filter.
+Word statistics: per censored word, category, row/occurrence/song/artist counts, cut rate, and
+the most common replacements from a word-level diff of original and Kidz Bop lines
+(`data/artifacts/kidzbop_words.csv`, `kidzbop_substitutions.csv`).
 
-   **Vetting words by hand:** `annotations/explicit_word_vetting.csv` holds one row per word
-   with a `verdict` you fill in and a free-text `note`:
-   - `not_explicit`: removed before ranking (e.g. "skrrt", "racks")
-   - `explicit`: always included, even if it ranks low or was added by hand
-   - `unsure` or blank: no effect
+### 6. Genius sections
 
-   The file is committed and the script never rewrites existing rows. To queue more words for
-   review, run it with `--add-to-vetting N`: any of the top N words not yet in the file are
-   appended with a blank verdict, and re-running adds nothing new. `lexicon_metrics.json`
-   reports the lookup both with and without vetting so you can see the effect.
-3. **`classifier`** fine-tunes DistilRoBERTa on one random section per song with the song's
-   label, and scores a song by its highest section (MiSonGyny 2026 recipe). The section-level
-   scores separate explicit sections (to rewrite) from clean ones (no-change examples).
-   Output: `outputs/explicit_classifier/`.
+Cleaning: section headers become metadata (type, performers); credit headers, inline tags and
+scrape artifacts are removed; look-alike Cyrillic/Greek letters are mapped to Latin;
+parenthetical ad-libs move to `adlibs`; lines without syllables are dropped; repeated sections
+are kept once.
 
-## Vernacular preservation (AAE proportion)
+Sampling: a section is eligible if its type is verse, chorus, hook, pre-/post-chorus, bridge or
+refrain, it has 4–16 lines, and it contains a detected explicit word. One random eligible song
+per artist, one random eligible section from it; artists with fewer than 3 eligible songs are
+dropped; Kidz Bop songs are excluded. Each record has per-line syllables, stress, rhyme scheme
+(stressed-vowel classes), ad-libs, and up to 8 lines of context before and after.
 
-```bash
-python -m radio_ready.aae
-```
+### 7. AAE proportion
 
-Run after `genius`. It adds `aae_proportion` to every record in
-`data/processed/genius_sections.jsonl` (or the JSONL files you pass): the share of the
-section's words that come from the African American English topic of the TwitterAAE model
-(Blodgett et al., EMNLP 2016). This is a proportion of vernacular in the text, not a class for
-the section or its author, and it never filters anything.
+Proportion of tokens from the African American English topic of the TwitterAAE model
+(Blodgett et al. 2016). `aae.vernacular_shift(scorer, original, rewrite)` returns the
+proportion before and after a rewrite.
 
-It is a post-check metric for rewrites: `aae.vernacular_shift(scorer, original, rewrite)`
-returns the proportion before and after, and a large negative `aae_delta` means the rewrite
-standardized the vernacular instead of only removing explicit content. On the current sections
-the median proportion is 0.41 for rap, 0.31 for R&B and 0.21 for pop.
+## Scoring models
 
-The model's learned count tables are used unmodified; the inference is adapted from the
-authors' MIT-licensed `predict.py`, with their copyright and license notice in `aae.py`.
+| Model | Use | Threshold |
+| --- | --- | --- |
+| `sentence-transformers/all-distilroberta-v1` | similarity filter | cosine ≥ 0.70 (ParaDeHate) |
+| `unitary/unbiased-toxic-roberta` | toxicity filter | ≥ 0.9 (ParaDeHate) |
+| `sentence-transformers/LaBSE` | meaning-preservation metric | — |
+| `s-nlp/roberta_toxicity_classifier` | clean-output metric | — |
+
+## LLM-judged artifacts (not in the pipeline)
+
+`src/radio_ready/llm_judgment/` contains artifacts based on Claude's judgment. No pipeline step
+imports them.
+
+- `claude_word_tiers.py`: strong / mild / kb_only tiers for Kidz Bop words, with word sets
+  written by Claude. Output: `data/artifacts/llm_judgment/claude_word_tiers.csv`.
+
+## Licenses
+
+The code in this repository is MIT-licensed ([LICENSE](LICENSE)). Data, models and third-party
+code keep their own licenses:
+
+### Datasets
+
+| Dataset | License |
+| --- | --- |
+| [ParaDetox](https://huggingface.co/datasets/s-nlp/paradetox) | OpenRAIL++ |
+| [The Pudding data (Kidz Bop)](https://github.com/the-pudding/data/tree/master/kidz-bop) | MIT |
+| [Genius lyrics (cleaned)](https://huggingface.co/datasets/theelderemo/genius-lyrics-cleaned) | MIT (dataset); lyrics are copyrighted by their rights holders |
+| [Spotify tracks](https://huggingface.co/datasets/maharshipandya/spotify-tracks-dataset) | BSD |
+| [MGPHot](https://zenodo.org/records/15372063) | CC BY-NC-ND 4.0 |
+| [Surge AI Obscenity List](https://huggingface.co/datasets/mmathys/profanity) | MIT |
+| [TwitterAAE model](https://github.com/slanglab/twitteraae) | MIT |
+
+### Models
+
+| Model | License |
+| --- | --- |
+| `sentence-transformers/all-distilroberta-v1` | Apache-2.0 |
+| `unitary/unbiased-toxic-roberta` | Apache-2.0 |
+| `sentence-transformers/LaBSE` | Apache-2.0 |
+| `s-nlp/roberta_toxicity_classifier` | OpenRAIL++ |
+| `distilroberta-base` | Apache-2.0 |
+| `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-7B-Instruct` | Apache-2.0 |
+
+### Code
+
+| Component | License |
+| --- | --- |
+| `aae.py` inference, adapted from `slanglab/twitteraae` `predict.py` | MIT, © 2019 Su Lin Blodgett and Brendan O'Connor (notice in file) |
+| `pronouncing` | BSD-3-Clause |
+| `cmudict` (Python package, dependency of `pronouncing`) | GPL-3.0-or-later; dictionary data under the CMUdict BSD-style license |
+
+## References
+
+- Blodgett, Green, O'Connor. Demographic Dialectal Variation in Social Media: A Case Study of
+  African-American English. EMNLP 2016.
+- Fell, Cabrio, Corazza, Gandon. Comparing Automated Methods to Detect Explicit Content in Song
+  Lyrics. RANLP 2019.
+- Logacheva et al. ParaDetox: Detoxification with Parallel Data. ACL 2022.
+- Yuan et al. LLM in the Loop: Creating the ParaDeHate Dataset for Hate Speech
+  Detoxification. Findings of IJCNLP-AACL 2025.

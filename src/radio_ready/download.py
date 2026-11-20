@@ -1,6 +1,6 @@
-"""Download raw datasets into data/raw/ and pre-cache the scoring models.
+"""Download raw datasets into data/raw/ and the scoring models into the Hugging Face cache.
 
-Usage (from the repository root):
+Run:
     python -m radio_ready.download all
     python -m radio_ready.download paradetox kidz-bop
     python -m radio_ready.download spotify-tracks mgphot surge-profanity

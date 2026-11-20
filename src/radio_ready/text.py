@@ -6,6 +6,8 @@ from functools import lru_cache
 import pronouncing
 
 WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)*'?")
+TOKEN = re.compile(r"[a-z]+(?:'[a-z]+)*")
+HEADER_LINE = re.compile(r"^\s*\[[^\]]*\]\s*$", re.MULTILINE)
 PARENTHETICAL = re.compile(r"\(([^()]*)\)")
 VOWEL_GROUP = re.compile(r"[aeiouy]+")
 
@@ -29,6 +31,11 @@ def normalize(text: str) -> str:
 
 def words(text: str) -> list[str]:
     return WORD.findall(text)
+
+
+def tokenize(text: str) -> list[str]:
+    """Lowercase word tokens with section headers removed (used by the lexicon and detector)."""
+    return TOKEN.findall(HEADER_LINE.sub(" ", str(text).lower()).replace("’", "'"))
 
 
 def split_adlibs(line: str) -> tuple[str, list[str]]:

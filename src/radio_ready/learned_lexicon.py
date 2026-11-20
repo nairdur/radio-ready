@@ -2,33 +2,32 @@
 
 Importance of word w:  I(w) = rate(w, explicit songs) / rate(w, clean songs), where rate is the
 share of songs containing w (add-one smoothed). Words in fewer than --min-df explicit songs
-(too unique) or in more than --max-clean-rate of clean songs (too common) are dropped, and the
-top 1,000 are kept as candidates.
+or in more than --max-clean-rate of clean songs are dropped; the top 1,000 are kept.
 
 Two classifiers, as in the paper:
   lookup      explicit if the song contains any of the top-n words (n tuned on val)
   regression  balanced logistic regression on counts of the top-n words
 
 Baseline: lookup with the Surge AI Obscenity List (human severity ratings), single-word entries
-with mean severity >= --surge-min-severity. Surge ratings are also attached to every learned
-word as a cross-check.
+with severity >= --surge-min-severity. Surge ratings are attached to every learned word.
 
 Human vetting (annotations/explicit_word_vetting.csv, committed, never overwritten):
-  verdict = not_explicit  word is removed before ranking (e.g. rap slang like "skrrt")
+  verdict = not_explicit  word is removed before ranking
   verdict = explicit      word is always in the lookup and regression vocabularies
   verdict = unsure / ""   no effect
 --add-to-vetting N makes sure the top N words of the vetted ranking are in the file, appending
 missing ones with a blank verdict; re-running adds nothing new unless exclusions pulled new
 words into the top N. Existing rows and notes are left untouched.
 
+Inputs:  data/processed/labels/songs.parquet, data/raw/surge-profanity,
+         annotations/explicit_word_vetting.csv
+Outputs: data/artifacts/learned_explicit_words.csv, data/artifacts/lexicon_metrics.json
+
 Run:  python -m radio_ready.learned_lexicon [--add-to-vetting 128]
-Needs data/processed/labels/songs.parquet (python -m radio_ready.labels).
-Writes data/artifacts/learned_explicit_words.csv and data/artifacts/lexicon_metrics.json.
 """
 
 import argparse
 import json
-import re
 from collections import Counter
 
 import numpy as np
@@ -37,16 +36,13 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score, precision_score, recall_score
 
 from radio_ready import paths
+from radio_ready.text import tokenize
 
-SONGS = paths.PROCESSED / "labels" / "songs.parquet"
-SURGE_CSV = paths.RAW / "surge-profanity" / "profanity_en.csv"
-HEADER_LINE = re.compile(r"^\s*\[[^\]]*\]\s*$", re.MULTILINE)
-TOKEN = re.compile(r"[a-z]+(?:'[a-z]+)*")
+SONGS = paths.SONGS_PARQUET
+SURGE_CSV = paths.SURGE_CSV
 SIZES = [4, 8, 16, 32, 64, 128, 256, 512]
 
 
-def tokenize(lyrics: str) -> list[str]:
-    return TOKEN.findall(HEADER_LINE.sub(" ", str(lyrics).lower()).replace("’", "'"))
 
 
 def metrics(y_true, y_pred) -> dict:
@@ -105,7 +101,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Learn an explicit-word dictionary (Fell 2019).")
     parser.add_argument("--min-df", type=int, default=10)
     parser.add_argument("--max-clean-rate", type=float, default=0.3)
-    parser.add_argument("--surge-min-severity", type=float, default=2.0)
+    parser.add_argument("--surge-min-severity", type=float, nargs="+", default=[1.0, 2.0])
     parser.add_argument("--add-to-vetting", type=int, default=0, metavar="N",
                         help="append the top N not-yet-vetted words to the vetting CSV")
     args = parser.parse_args()
@@ -197,12 +193,15 @@ def main() -> None:
     }
     clf = LogisticRegression(class_weight="balanced", max_iter=2000).fit(counts("train", reg_vocab), y)
     surge = load_surge()
-    surge_words = set(surge.index[(surge["surge_severity"] >= args.surge_min_severity)
-                                  & ~surge.index.str.contains(" ")])
+    single = ~surge.index.str.contains(" ")
+    surge_words = {sev: set(surge.index[(surge["surge_severity"] >= sev) & single])
+                   for sev in args.surge_min_severity}
     for split in ("test", "gold"):
         results[split]["majority_clean"] = metrics(labels[split], np.zeros_like(labels[split]))
-        results[split][f"surge_lookup_sev>={args.surge_min_severity}"] = metrics(
-            labels[split], lookup(split, surge_words))
+        for sev, sw in surge_words.items():
+            results[split][f"surge_lookup_sev>={sev}"] = metrics(labels[split], lookup(split, sw))
+            results[split][f"learned_or_surge_sev>={sev}"] = metrics(
+                labels[split], lookup(split, lookup_words | sw))
         results[split][f"learned_lookup_unvetted@{best['lookup']}"] = metrics(
             labels[split], lookup(split, raw_words))
         results[split][f"learned_lookup@{best['lookup']}"] = metrics(
@@ -213,8 +212,8 @@ def main() -> None:
     lex["in_lookup"] = lex["word"].isin(lookup_words)
     lex["in_regression"] = lex["word"].isin(reg_vocab)
     paths.ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    lex.to_csv(paths.ARTIFACTS / "learned_explicit_words.csv", index=False)
-    with open(paths.ARTIFACTS / "lexicon_metrics.json", "w") as f:
+    lex.to_csv(paths.LEARNED_LEXICON_CSV, index=False)
+    with open(paths.LEXICON_METRICS_JSON, "w") as f:
         json.dump(results, f, indent=2)
 
     print(json.dumps(results["label_counts"]))
@@ -228,7 +227,7 @@ def main() -> None:
     print(f"vetting: {results['vetting']}")
     if added:
         print(f"appended {added} unvetted words to {paths.VETTING_CSV}")
-    print(f"outputs: {paths.ARTIFACTS / 'learned_explicit_words.csv'}, lexicon_metrics.json")
+    print(f"outputs: {paths.LEARNED_LEXICON_CSV}, {paths.LEXICON_METRICS_JSON}")
 
 
 if __name__ == "__main__":

@@ -1,21 +1,24 @@
 """Clean Genius lyrics, split songs into sections, and sample explicit sections.
 
+Inputs:  data/raw/genius, learned explicit-word list (radio_ready.explicit), Kidz Bop songs
+Output:  data/processed/genius_sections.jsonl
+
 Cleaning per song:
-  - full-line headers like [Verse 1: Eminem] become section metadata (type + performers);
+  - full-line headers like [Verse 1: Eminem] become section metadata (type, performers);
     credit headers ([Produced by ...]) and inline tags ([?]) are dropped
-  - scrape junk (title line "... Lyrics", "123Embed", "You might also like") is removed
-  - parenthetical ad-libs are moved out of the line into an `adlibs` field
-  - repeated sections (same chorus twice) are kept once, with a repeat count
+  - scrape artifacts (title line "... Lyrics", "123Embed", "You might also like") are removed
+  - Cyrillic/Greek look-alike letters are mapped to Latin
+  - parenthetical ad-libs are moved from the line to an `adlibs` field
+  - lines with no syllables ("Mm") are dropped
+  - repeated sections are kept once, with a repeat count
 
-A section is eligible when its type is a sung/rapped part (verse, chorus, hook, ...), it has
---min-lines..--max-lines lines, and its main lines contain a strong explicit word.
+A section is eligible when its type is in LYRIC_TYPES, it has --min-lines to --max-lines
+lines, and its lines contain a detected explicit word. Sampling: one random eligible song per
+artist (seeded reservoir sampling), then one random eligible section from that song. Artists
+with fewer than --min-artist-songs eligible songs are dropped. Songs that match a Kidz Bop song
+(fuzzy title + artist) are excluded.
 
-Sampling mirrors the earlier branch: one random eligible song per artist (reservoir sampling,
-seeded), then one random eligible section from that song. Songs in the Kidz Bop data
-(fuzzy title + artist match) are excluded so DPO negatives never overlap synthetic data.
-
-Run:  python -m radio_ready.genius [--tags rap trap pop rb] [--limit 50000]
-Writes data/processed/genius_sections.jsonl
+Run:  python -m radio_ready.genius
 """
 
 import argparse
@@ -30,7 +33,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from radio_ready import paths
-from radio_ready.lexicon import ExplicitMatcher
+from radio_ready.explicit import ExplicitDetector
 from radio_ready.text import (
     HOMOGLYPHS, assonance_key, end_word, normalize, split_adlibs, stress, syllables,
 )
@@ -203,7 +206,7 @@ class KidzBopSongs:
         return sorted(found)
 
 
-def build_record(row: dict, sections: list[Section], index: int, explicit: tuple, eligible: int):
+def build_record(row: dict, sections: list[Section], index: int, explicit: list[str], eligible: int):
     s = sections[index]
     prev_lines = sections[index - 1].lines if index > 0 else []
     next_lines = sections[index + 1].lines if index + 1 < len(sections) else []
@@ -254,13 +257,13 @@ def main() -> None:
     parser.add_argument("--tags", nargs="+", default=["rap", "trap", "pop", "rb"])
     parser.add_argument("--min-lines", type=int, default=4)
     parser.add_argument("--max-lines", type=int, default=16)
-    parser.add_argument("--min-artist-songs", type=int, default=3,
-                        help="drop artists with fewer eligible songs (filters one-off uploads)")
+    parser.add_argument("--min-artist-songs", type=int, default=3)
+    parser.add_argument("--detector", choices=["learned", "surge"], default="learned")
     parser.add_argument("--limit", type=int, default=None, help="max songs to scan (testing)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    matcher = ExplicitMatcher(tiers=("strong",))
+    detector = ExplicitDetector(args.detector)
     kidz_bop = KidzBopSongs()
     rng = random.Random(args.seed)
     counts: Counter = Counter()
@@ -270,7 +273,7 @@ def main() -> None:
     for row in iter_rows(set(args.tags), args.limit):
         stats["scanned"] += 1
         row["lyrics"] = (row["lyrics"] or "").translate(HOMOGLYPHS)
-        if not matcher.pattern.search(row["lyrics"]):
+        if not detector.is_explicit(row["lyrics"]):
             continue
         stats["explicit_songs"] += 1
         if kidz_bop.match(row["artist"], row["title"]):
@@ -280,7 +283,7 @@ def main() -> None:
         eligible = []
         for i, s in enumerate(sections):
             if s.type in LYRIC_TYPES and args.min_lines <= len(s.lines) <= args.max_lines:
-                hits = matcher.find("\n".join(s.lines))
+                hits = detector.find("\n".join(s.lines))
                 if hits:
                     eligible.append((i, hits))
         if not eligible:
@@ -298,7 +301,7 @@ def main() -> None:
     records.sort(key=lambda r: (r["artist"].lower(), r["title"].lower()))
 
     paths.PROCESSED.mkdir(parents=True, exist_ok=True)
-    out = paths.PROCESSED / "genius_sections.jsonl"
+    out = paths.GENIUS_SECTIONS_JSONL
     with open(out, "w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")

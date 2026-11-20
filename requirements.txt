@@ -8,5 +8,6 @@ bert-score
 pronouncing
 pandas
 pyarrow
+scikit-learn
 tqdm
 huggingface_hub

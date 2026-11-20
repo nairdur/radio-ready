@@ -1,7 +1,9 @@
-"""Model-based scorers used for filtering (ParaDeHate setup).
+"""Similarity and toxicity scorers for filtering, with thresholds from ParaDeHate.
 
-Filtering uses all-distilroberta-v1 + unbiased-toxic-roberta. Evaluation should use different
-models (LaBSE, s-nlp/roberta_toxicity_classifier) so filters and metrics do not share a scorer.
+  Similarity  sentence-transformers/all-distilroberta-v1, cosine; threshold 0.70 (Sec. 3.2)
+  Toxicity    unitary/unbiased-toxic-roberta, `toxicity` head; threshold 0.9 (Sec. 3.3)
+
+Evaluation models (LaBSE, s-nlp/roberta_toxicity_classifier) are separate from these.
 """
 
 import numpy as np

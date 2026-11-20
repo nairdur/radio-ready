@@ -1,4 +1,4 @@
-"""Shared data locations."""
+"""File locations shared by all pipeline steps."""
 
 from pathlib import Path
 
@@ -7,12 +7,23 @@ DATA = ROOT / "data"
 RAW = DATA / "raw"
 ARTIFACTS = DATA / "artifacts"
 PROCESSED = DATA / "processed"
+OUTPUTS = ROOT / "outputs"
 
+# Raw inputs
 KIDZ_BOP_CSV = RAW / "kidz-bop" / "KB_censored-lyrics.csv"
 GENIUS_DIR = RAW / "genius"
-LEXICON_CSV = ARTIFACTS / "explicit_words.csv"
+SURGE_CSV = RAW / "surge-profanity" / "profanity_en.csv"
 
-# Human-edited files live outside data/ so they are committed and never regenerated.
+# Human-edited files: committed, never regenerated
 ANNOTATIONS = ROOT / "annotations"
 VETTING_CSV = ANNOTATIONS / "explicit_word_vetting.csv"
-SUBSTITUTIONS_CSV = ARTIFACTS / "kidzbop_substitutions.csv"
+
+# Generated
+SONGS_PARQUET = PROCESSED / "labels" / "songs.parquet"
+LEARNED_LEXICON_CSV = ARTIFACTS / "learned_explicit_words.csv"
+LEXICON_METRICS_JSON = ARTIFACTS / "lexicon_metrics.json"
+KIDZBOP_DIR = PROCESSED / "kidzbop"
+KIDZBOP_WORDS_CSV = ARTIFACTS / "kidzbop_words.csv"
+KIDZBOP_SUBSTITUTIONS_CSV = ARTIFACTS / "kidzbop_substitutions.csv"
+GENIUS_SECTIONS_JSONL = PROCESSED / "genius_sections.jsonl"
+CLASSIFIER_DIR = OUTPUTS / "explicit_classifier"

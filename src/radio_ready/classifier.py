@@ -6,11 +6,10 @@ At inference a song's score is the max over its sections, and the decision thres
 on val for macro-F1. Reported on the Spotify test split and on the MGPHot gold split, next to
 the lexicon baselines in data/artifacts/lexicon_metrics.json (Fell et al. 2019 setup).
 
-The trained model scores single sections, so it can label Genius sections as explicit (rewrite)
-or clean (keep as no-change examples).
+Inputs:  data/processed/labels/songs.parquet
+Output:  outputs/explicit_classifier/{model/, metrics.json}
 
 Run:  python -m radio_ready.classifier [--epochs 3]
-Writes outputs/explicit_classifier/{model/, metrics.json}.
 """
 
 import argparse
@@ -27,8 +26,8 @@ from radio_ready import paths
 from radio_ready.genius import split_sections
 from radio_ready.learned_lexicon import metrics
 
-SONGS = paths.PROCESSED / "labels" / "songs.parquet"
-OUT_DIR = paths.ROOT / "outputs" / "explicit_classifier"
+SONGS = paths.SONGS_PARQUET
+OUT_DIR = paths.CLASSIFIER_DIR
 BASE_MODEL = "distilroberta-base"
 
 

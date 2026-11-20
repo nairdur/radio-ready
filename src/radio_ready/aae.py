@@ -1,18 +1,17 @@
 """Proportion of African American English (AAE) vernacular in a section, as a preservation metric.
 
 Model: TwitterAAE (Blodgett, Green & O'Connor, EMNLP 2016), used unmodified. Its learned count
-tables are downloaded with `python -m radio_ready.download twitteraae`. It is a mixed-membership
-model: for a text it infers what proportion of the *words* come from an AAE-associated dialect
-topic. That is a property of the language in the text, not a label on the text or its author,
-so it is stored as a number, never as a class.
+tables are downloaded with `python -m radio_ready.download twitteraae`. For a text it infers
+the proportion of words that come from the AAE-associated dialect topic.
 
-Metric use: `vernacular_shift(original, rewrite)` compares the proportion before and after a
-rewrite. A large drop means the rewrite standardized the vernacular instead of only removing
-explicit content.
+`vernacular_shift(original, rewrite)` returns the proportion before and after a rewrite.
+
+Inputs:  data/raw/twitteraae, JSONL files with a `lines` field
+         (default data/processed/genius_sections.jsonl)
+Output:  adds `aae_proportion` to each record in place (None if too few tokens are in the
+         model's vocabulary)
 
 Run:  python -m radio_ready.aae [path.jsonl ...]
-Adds `aae_proportion` (None if too few tokens are in the model's vocabulary) to every record
-with a `lines` field, rewriting the file in place. Default: data/processed/genius_sections.jsonl.
 
 The inference below (`proportion`) is adapted from slanglab/twitteraae code/predict.py:
     Copyright (c) 2019 Su Lin Blodgett and Brendan O'Connor
@@ -109,7 +108,7 @@ def tag_file(scorer: AAEScorer, path: Path) -> list:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Add AAE vernacular proportions to JSONL records.")
     parser.add_argument("files", nargs="*", type=Path,
-                        default=[paths.PROCESSED / "genius_sections.jsonl"])
+                        default=[paths.GENIUS_SECTIONS_JSONL])
     args = parser.parse_args()
     scorer = AAEScorer()
     for path in args.files:
