@@ -32,36 +32,44 @@ src/radio_ready/
   scoring.py          similarity and toxicity models
   text.py             normalization, syllables, stress, rhyme
   paths.py            file locations
+  pipeline.py         runs all steps in order
   llm_judgment/       LLM-judged artifacts, not used by the pipeline
 ```
 
-## Setup
+## Quick start
+
+From the repository root:
 
 ```bash
-python -m venv .venv
+python -m venv .venv && source .venv/Scripts/activate && pip install -r requirements.txt && pip install -e . && python -m radio_ready.pipeline
 ```
 
-```bash
-pip install -r requirements.txt
-```
-
-```bash
-pip install -e .
-```
+On Linux/macOS use `source .venv/bin/activate`. The full run downloads ~4 GB and takes roughly
+45 minutes; later runs reuse downloaded files.
 
 ## Pipeline
 
-Run from the repository root, in order.
+```bash
+python -m radio_ready.pipeline
+```
 
-| Step | Command | Inputs | Outputs |
+Runs every step below in order and stops at the first failure. Options:
+`--from STEP`, `--to STEP`, `--only STEP [STEP ...]`, `--with-classifier` (step 4 is skipped
+by default; no other step depends on it). Example, after editing the vetting file:
+
+```bash
+python -m radio_ready.pipeline --from learned_lexicon
+```
+
+| Step | Module | Inputs | Outputs |
 | --- | --- | --- | --- |
-| 1 | `python -m radio_ready.download all` | — | `data/raw/*`, model cache |
-| 2 | `python -m radio_ready.labels` | Genius, Spotify, MGPHot | `data/processed/labels/songs.parquet` |
-| 3 | `python -m radio_ready.learned_lexicon` | labels, Surge, vetting | `data/artifacts/learned_explicit_words.csv`, `lexicon_metrics.json` |
-| 4 | `python -m radio_ready.classifier` | labels | `outputs/explicit_classifier/` |
-| 5 | `python -m radio_ready.kidzbop` | Kidz Bop, Genius, step 3 | `data/artifacts/kidzbop_*.csv`, `data/processed/kidzbop/{sections,pilot}.jsonl` |
-| 6 | `python -m radio_ready.genius` | Genius, Kidz Bop, step 3 | `data/processed/genius_sections.jsonl` |
-| 7 | `python -m radio_ready.aae` | step 6, TwitterAAE | adds `aae_proportion` to step 6 output |
+| 1 | `download` | — | `data/raw/*`, model cache |
+| 2 | `labels` | Genius, Spotify, MGPHot | `data/processed/labels/songs.parquet` |
+| 3 | `learned_lexicon` | labels, Surge, vetting | `data/artifacts/learned_explicit_words.csv`, `lexicon_metrics.json` |
+| 4 | `classifier` | labels | `outputs/explicit_classifier/` |
+| 5 | `kidzbop` | Kidz Bop, Genius, step 3 | `data/artifacts/kidzbop_*.csv`, `data/processed/kidzbop/{sections,pilot}.jsonl` |
+| 6 | `genius` | Genius, Kidz Bop, step 3 | `data/processed/genius_sections.jsonl` |
+| 7 | `aae` | step 6, TwitterAAE | adds `aae_proportion` to step 6 output |
 
 ### 2. Labels
 
@@ -135,16 +143,185 @@ parenthetical ad-libs move to `adlibs`; lines without syllables are dropped; rep
 are kept once.
 
 Sampling: a section is eligible if its type is verse, chorus, hook, pre-/post-chorus, bridge or
-refrain, it has 4–16 lines, and it contains a detected explicit word. One random eligible song
-per artist, one random eligible section from it; artists with fewer than 3 eligible songs are
-dropped; Kidz Bop songs are excluded. Each record has per-line syllables, stress, rhyme scheme
-(stressed-vowel classes), ad-libs, and up to 8 lines of context before and after.
+refrain, it has 4–16 lines, and it contains a detected explicit word. Every artist with an
+eligible section is kept: one random eligible song per artist, one random eligible section from
+it. Kidz Bop songs are excluded.
+
+`data/processed/genius_sections.jsonl` has one JSON object per line, one section per artist.
+Example: Tink, "Ride It", Verse 3 (Dej Loaf).
+
+| Field | Meaning | Example |
+| --- | --- | --- |
+| `id` | section id (hash of artist, title, section index) | `"793b09d47609"` |
+| `artist` | Genius artist | `"Tink"` |
+| `title` | song title | `"Ride It"` |
+| `tag` | Genius genre tag | `"rb"` |
+| `year` | release year | `2019` |
+| `section_index` | position of the section in the song (0-based) | `6` |
+| `n_sections` | sections in the song after cleaning | `8` |
+| `section_header` | original header text | `"Verse 3: Dej Loaf"` |
+| `section_type` | normalized type | `"verse"` |
+| `performers` | names after the colon in the header | `["Dej Loaf"]` |
+| `repeats` | times the section appears in the song | `1` |
+| `lines` | lyric lines to rewrite, ad-libs removed | `["Put that pussy on Versace plates", "Make me feel some type of way", ...]` |
+| `syllables` | syllables per line | `[9, 7, 8, 9, 9, 9, 9, 9]` |
+| `stress` | CMU stress per line (1 primary, 2 secondary, 0 unstressed, ? unknown word) | `["111010101", "1111111", "??111101", ...]` |
+| `rhyme_scheme` | end-rhyme letter per line, by stressed vowel | `"AAAAAAAA"` |
+| `adlibs` | parenthetical ad-libs removed from the lines | `["Right, um", "Type of way", "Wide awake", ...]` |
+| `explicit_words` | detected explicit tokens, one per occurrence | `["pussy", "pussy", "fuck", "bitch"]` |
+| `eligible_sections_in_song` | eligible sections in this song | `1` |
+| `artist_eligible_songs` | artist's songs with an eligible section | `91` |
+| `context_before` | up to 8 lines of the previous section | `["Ride all night", "Oh, I wanna ride all night", ...]` |
+| `context_after` | up to 8 lines of the next section | `["Let me ride it, let me ride it", "Ride all night", ...]` |
+| `aae_proportion` | AAE proportion (step 7; null if too few known tokens) | `0.629` |
+
+<details>
+<summary>Full record</summary>
+
+```json
+{
+  "id": "793b09d47609",
+  "artist": "Tink",
+  "title": "Ride It",
+  "tag": "rb",
+  "year": 2019,
+  "section_index": 6,
+  "n_sections": 8,
+  "section_header": "Verse 3: Dej Loaf",
+  "section_type": "verse",
+  "performers": [
+    "Dej Loaf"
+  ],
+  "repeats": 1,
+  "lines": [
+    "Put that pussy on Versace plates",
+    "Make me feel some type of way",
+    "Nightcap, it got him wide awake",
+    "Pussy drippin', 'bout to ride his wave",
+    "She's so bossy, she intimidate",
+    "She so bossy, asked him on a date",
+    "Might just fuck him on the interstate",
+    "Told him he should give his bitch a break"
+  ],
+  "syllables": [
+    9,
+    7,
+    8,
+    9,
+    9,
+    9,
+    9,
+    9
+  ],
+  "stress": [
+    "111010101",
+    "1111111",
+    "??111101",
+    "101011111",
+    "111012102",
+    "111011101",
+    "111110201",
+    "111111101"
+  ],
+  "rhyme_scheme": "AAAAAAAA",
+  "adlibs": [
+    "Right, um",
+    "Type of way",
+    "Wide awake",
+    "Intimidate",
+    "So good",
+    "Fuck you on the interstate",
+    "Give it a break"
+  ],
+  "explicit_words": [
+    "pussy",
+    "pussy",
+    "fuck",
+    "bitch"
+  ],
+  "eligible_sections_in_song": 1,
+  "context_before": [
+    "Ride all night",
+    "Oh, I wanna ride all night",
+    "Ride all night",
+    "Oh, I wanna ride all night"
+  ],
+  "context_after": [
+    "Let me ride it, let me ride it",
+    "Ride all night",
+    "Oh, I wanna ride all night",
+    "Ride all night",
+    "Oh, I wanna ride all night"
+  ],
+  "artist_eligible_songs": 91,
+  "aae_proportion": 0.629
+}
+```
+
+</details>
+
+`data/processed/kidzbop/sections.jsonl` uses the same fields plus `kidz_bop_artist`,
+`kidz_bop_song`, `has_kidz_bop_edit`, `kidz_bop_lines`, `kidz_bop_edits`, `split`, `pilot`.
 
 ### 7. AAE proportion
 
 Proportion of tokens from the African American English topic of the TwitterAAE model
 (Blodgett et al. 2016). `aae.vernacular_shift(scorer, original, rewrite)` returns the
 proportion before and after a rewrite.
+
+## Rewrite generation (pilot)
+
+Only **target lines** are rewritten: lines of a section in which the explicit-word detector
+(the same one that selects sections) finds a word. The model sees the whole section with each
+line's syllable count and rhyme letter, plus up to 4 lines before and after it; target lines are
+marked with the words found. All other lines are copied from the original.
+
+All generators use the same prompt, written out in full in `prompts.py` (`SYSTEM_PROMPT`,
+`INSTRUCTIONS`, `USER_TEMPLATE`, `BATCH_TEMPLATE`; version in `PROMPT_VERSION`). It asks for a
+radio edit that keeps meaning and context, meter (syllable count and stress), rhyme scheme
+(exact or slant), sound, and the artist's style, spelling and grammar, with no explicit words,
+censored or misspelled forms, sound-alikes or innuendo.
+
+### Local 7B
+
+```bash
+python -m radio_ready.generate
+```
+
+Qwen2.5-7B-Instruct loaded in 4-bit (NF4, bitsandbytes) to fit an 8 GB GPU, greedy decoding.
+Default input: the Kidz Bop pilot (`data/processed/kidzbop/pilot.jsonl`). Output:
+`outputs/generations/<name>.jsonl` with the raw response, the target lines, their rewrites and
+the merged section (`valid` = every target line returned). Interrupted runs resume. Sections
+reserved for commercial LLMs are skipped.
+
+### Commercial LLMs (copy-paste)
+
+The pipeline's `commercial` step keeps one table, `data/commercial/commercial_table.csv`,
+with a row per section: every Kidz Bop pilot section plus 50 Genius sections chosen by a hash of
+the section id (the local model never rewrites those Genius sections).
+
+To fill it, open the table in Excel or Google Sheets and, row by row:
+1. copy the `prompt` cell into the LLM,
+2. paste its answer into that model's column (`output_chatgpt`, `output_claude`,
+   `output_gemini`; rename a column to the exact model, e.g. `output_gemini-2.5-pro`, or add
+   one).
+
+The prompt asks for the whole section on one line with lines separated by ` / `, so each
+answer fits in one cell. No import step: `compare` reads the filled cells directly and reports
+answers it cannot use (wrong number of lines, or an explicit line left unchanged). Re-running
+the step only adds new rows and model columns and never changes filled cells; close the file in
+Excel first. Options: `python -m radio_ready.commercial --genius-sections 100 --models gpt-5`.
+
+### Side-by-side comparison
+
+```bash
+python -m radio_ready.compare
+```
+
+Scores Kidz Bop, every local generation file and every commercial model on the same sections:
+explicit words left, syllable match, end rhyme kept, clean lines copied unchanged, LaBSE
+similarity, AAE delta. Outputs in `outputs/comparison/<name>/`: `scores.csv`, `summary.csv`,
+`side_by_side.md`, and a blinded `ranking.csv` with `ranking_key.csv` for human ranking.
 
 ## Scoring models
 

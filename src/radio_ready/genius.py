@@ -14,8 +14,8 @@ Cleaning per song:
 
 A section is eligible when its type is in LYRIC_TYPES, it has --min-lines to --max-lines
 lines, and its lines contain a detected explicit word. Sampling: one random eligible song per
-artist (seeded reservoir sampling), then one random eligible section from that song. Artists
-with fewer than --min-artist-songs eligible songs are dropped. Songs that match a Kidz Bop song
+artist (seeded reservoir sampling), then one random eligible section from that song. Every
+artist with an eligible section is kept (--min-artist-songs, default 1). Songs that match a Kidz Bop song
 (fuzzy title + artist) are excluded.
 
 Run:  python -m radio_ready.genius
@@ -257,7 +257,7 @@ def main() -> None:
     parser.add_argument("--tags", nargs="+", default=["rap", "trap", "pop", "rb"])
     parser.add_argument("--min-lines", type=int, default=4)
     parser.add_argument("--max-lines", type=int, default=16)
-    parser.add_argument("--min-artist-songs", type=int, default=3)
+    parser.add_argument("--min-artist-songs", type=int, default=1)
     parser.add_argument("--detector", choices=["combined", "learned", "surge"],
                         default="combined")
     parser.add_argument("--limit", type=int, default=None, help="max songs to scan (testing)")

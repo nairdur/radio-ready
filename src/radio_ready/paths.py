@@ -27,3 +27,8 @@ KIDZBOP_WORDS_CSV = ARTIFACTS / "kidzbop_words.csv"
 KIDZBOP_SUBSTITUTIONS_CSV = ARTIFACTS / "kidzbop_substitutions.csv"
 GENIUS_SECTIONS_JSONL = PROCESSED / "genius_sections.jsonl"
 CLASSIFIER_DIR = OUTPUTS / "explicit_classifier"
+GENERATIONS_DIR = OUTPUTS / "generations"
+COMPARISON_DIR = OUTPUTS / "comparison"
+
+# Commercial-LLM rewrites: never overwritten by the pipeline
+COMMERCIAL_DIR = DATA / "commercial"

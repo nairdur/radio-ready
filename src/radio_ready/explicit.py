@@ -20,7 +20,8 @@ import pandas as pd
 from radio_ready import paths
 from radio_ready.text import tokenize
 
-CENSORED = re.compile(r"(?<![\w*])[A-Za-z]+\*+[A-Za-z*]*")
+# f*ck, b*tches, f*** ; not stage directions such as "*horn honks*"
+CENSORED = re.compile(r"(?<![\w*])[A-Za-z]+(?:\*+[A-Za-z]+|\*{2,})[A-Za-z*]*")
 SURGE_MIN_SEVERITY = 1.0
 
 
