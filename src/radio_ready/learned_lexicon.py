@@ -202,6 +202,8 @@ def main() -> None:
             results[split][f"surge_lookup_sev>={sev}"] = metrics(labels[split], lookup(split, sw))
             results[split][f"learned_or_surge_sev>={sev}"] = metrics(
                 labels[split], lookup(split, lookup_words | sw))
+            results[split][f"combined_sev>={sev}"] = metrics(
+                labels[split], lookup(split, lookup_words | (sw & set(lex["word"]))))
         results[split][f"learned_lookup_unvetted@{best['lookup']}"] = metrics(
             labels[split], lookup(split, raw_words))
         results[split][f"learned_lookup@{best['lookup']}"] = metrics(

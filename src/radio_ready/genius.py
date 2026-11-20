@@ -1,6 +1,6 @@
 """Clean Genius lyrics, split songs into sections, and sample explicit sections.
 
-Inputs:  data/raw/genius, learned explicit-word list (radio_ready.explicit), Kidz Bop songs
+Inputs:  data/raw/genius, explicit-word list (radio_ready.explicit), Kidz Bop songs
 Output:  data/processed/genius_sections.jsonl
 
 Cleaning per song:
@@ -258,7 +258,8 @@ def main() -> None:
     parser.add_argument("--min-lines", type=int, default=4)
     parser.add_argument("--max-lines", type=int, default=16)
     parser.add_argument("--min-artist-songs", type=int, default=3)
-    parser.add_argument("--detector", choices=["learned", "surge"], default="learned")
+    parser.add_argument("--detector", choices=["combined", "learned", "surge"],
+                        default="combined")
     parser.add_argument("--limit", type=int, default=None, help="max songs to scan (testing)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

@@ -1,6 +1,8 @@
 """Explicit-word detection used by the pipeline (Genius sections, Kidz Bop pairs).
 
 Word lists:
+  combined learned + Surge words (severity >= SURGE_MIN_SEVERITY) that are also among the
+           learned candidates (learned_explicit_words.csv, after vetting); default
   learned  lookup words from `learned_lexicon` (Fell et al. 2019) after human vetting:
            rows of learned_explicit_words.csv with in_lookup = True, plus every word with
            verdict = explicit in annotations/explicit_word_vetting.csv
@@ -39,11 +41,19 @@ def surge_words(min_severity: float = SURGE_MIN_SEVERITY) -> set[str]:
     return set(s["text"])
 
 
-WORD_LISTS = {"learned": learned_words, "surge": surge_words}
+def learned_candidates() -> set[str]:
+    return set(pd.read_csv(paths.LEARNED_LEXICON_CSV, keep_default_na=False)["word"])
+
+
+def combined_words() -> set[str]:
+    return learned_words() | (surge_words() & learned_candidates())
+
+
+WORD_LISTS = {"combined": combined_words, "learned": learned_words, "surge": surge_words}
 
 
 class ExplicitDetector:
-    def __init__(self, source: str = "learned"):
+    def __init__(self, source: str = "combined"):
         self.source = source
         self.words = frozenset(WORD_LISTS[source]())
 

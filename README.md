@@ -77,7 +77,7 @@ Song-level labels joined onto Genius by normalized primary artist + title:
 Explicit-word list learned from the labels (Fell et al. 2019):
 `importance(w) = rate(w | explicit songs) / rate(w | clean songs)`. The lookup size is tuned on
 val. `lexicon_metrics.json` reports lookup and logistic regression on test and gold, with the
-Surge list (severity ≥ 2) as baseline.
+Surge list (severity ≥ 1 and ≥ 2) and the combined list as comparisons.
 
 `annotations/explicit_word_vetting.csv` holds a `verdict` per word:
 
@@ -100,9 +100,13 @@ score is the max over its sections; the threshold is tuned on val.
 `explicit.py` is used by steps 5 and 6. A text is explicit if any token is in the word list,
 or it contains a censored token (`f*ck`). Word lists (`--detector`):
 
-- `learned` (default): lookup words from step 3 after vetting, plus words marked `explicit`
-- `surge`: Surge AI Obscenity List entries with severity ≥ 2 (excludes e.g. "shit" 1.2,
-  "bitch" 1.4, "ass" 1.0)
+- `combined` (default): `learned`, plus Surge entries with severity ≥ 1 that are also among the
+  learned candidates (`learned_explicit_words.csv`, after vetting)
+- `learned`: lookup words from step 3 after vetting, plus words marked `explicit`
+- `surge`: Surge AI Obscenity List entries with severity ≥ 1 (`SURGE_MIN_SEVERITY`)
+
+Gold-set lookup results are in `lexicon_metrics.json` (`combined_sev>=*`, `learned_lookup@*`,
+`surge_lookup_sev>=*`).
 
 ### 5. Kidz Bop songs
 

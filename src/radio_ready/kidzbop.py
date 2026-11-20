@@ -192,7 +192,8 @@ def split_songs(keys: list[tuple[str, str]], ratios, seed: int) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Kidz Bop side-by-side sections and word stats.")
-    parser.add_argument("--detector", choices=["learned", "surge"], default="learned")
+    parser.add_argument("--detector", choices=["combined", "learned", "surge"],
+                        default="combined")
     parser.add_argument("--min-lines", type=int, default=4)
     parser.add_argument("--max-lines", type=int, default=16)
     parser.add_argument("--min-line-match", type=float, default=0.75)
