@@ -320,20 +320,41 @@ Output: `outputs/generations/<name>.jsonl`, one record per section with the merg
 filters) and every candidate with its scores. Genius sections reserved for commercial LLMs are
 skipped.
 
-### SFT pairs
+### Synthetic pairs
 
 ```bash
-python -m radio_ready.pairs qwen3-14b-4bit_genius_sections_v8-stanza-free_n5
+python -m radio_ready.rewrite                       # 7B drafts, 14B for hard lines (pilot by default)
+python -m radio_ready.pairs solid_pilot_solid-v1    # pairs + side-by-side .md + edit sheet
 ```
 
-Writes `data/processed/pairs/<name>.jsonl`: `original` and `rewrite` lines, `changed` line
-indexes, `syllables` and `rhyme_scheme` of the original (control-token values),
-`rewrite_syllables`, `split` (Genius: by artist, 60/20/20 as in step 2; Kidz Bop: by song),
-model, prompt version and the chosen candidates' scores. Kept: valid, passed the filters, at
-least one line changed, no detected explicit word left. Reserved commercial-evaluation sections
-are never exported. Several generation files can be merged; the first file wins for a section.
+`rewrite.py`: every explicit line gets a Qwen2.5-7B draft that replaces only the explicit words
+(no rhyme or syllable hints; one-for-one word swaps away from the explicit words are put back,
+so dialect stays as written). Hard lines (explicit end word, several explicit words, or a draft
+that fails a check) are rewritten by Qwen3-14B, which sees only the drafts, scored on meaning
+against the draft and on syllables and end rhyme against the original.
 
-ParaDetox (the first SFT stage) is used as downloaded (`data/raw/paradetox`).
+`pairs.py` writes `data/processed/pairs/<name>.jsonl` (`original`, `rewrite`, `changed`,
+`split`, model and prompt version; no training features) and `<name>.md`, a side-by-side view.
+Kept: valid, passed the filters, at least one line changed, no detected explicit word left.
+Reserved commercial-evaluation sections are never exported.
+
+### Human vetting
+
+```bash
+python -m radio_ready.vet        # or double-click vet.bat
+```
+
+One line at a time: the original with its explicit words highlighted and the rewrite in an
+edit field. Edit in place if needed, then Enter (like), Ctrl+Enter (superlike) or Esc (dislike);
+Up/Down go back or skip; Tab shows the 4-line stanza, original and rewritten (it closes on
+every new line). Alt+1-8 puts a suggested end word in place: clean words that rhyme with the
+original end word or its rhyme partners (`rhymes.py`: CMU rhymes of words common in clean
+lyrics, ranked by masked-LM fit in the line and meaning; sound-alikes of the explicit word and
+function words are left out; `python -m radio_ready.rhymes --build` once). Distinctive rewrites
+come first, generic ones ("stuff", "things") last. Verdicts and edits go to
+`annotations/pair_edits.csv` (committed; also editable in Excel), which `pairs.py` applies: a
+dislike leaves the section out, a section the filters dropped comes back when all its lines
+are liked or edited.
 
 ### Commercial LLMs (copy-paste)
 
