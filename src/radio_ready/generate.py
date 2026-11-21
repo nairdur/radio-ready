@@ -24,7 +24,8 @@ N > 1: top-p drops the unlikely tail, so the higher temperature varies the wordi
 junk) and keeps the best, ParaDeHate-style. A candidate passes when
   - the explicit-word detector finds nothing in it,
   - unbiased-toxic-roberta toxicity < 0.9           (ParaDeHate threshold, radio_ready.scoring)
-  - all-distilroberta-v1 cosine to the original >= 0.70 (ParaDeHate threshold)
+  - all-distilroberta-v1 cosine of the changed lines to their originals >= 0.70
+    (ParaDeHate threshold)
 Among passing candidates (or all, if none passes) the best breaks the fewest end rhymes
 (end word kept or a shared rhyme key with the original line), keeps every line within one
 syllable, then has the highest similarity x fluency. Fluency is the CoLA acceptability of each
@@ -105,6 +106,12 @@ def complete(tok, model, messages: list[dict], samples: int, max_new_tokens: int
             for o in out]
 
 
+def changed_text(original: list[str], lines: list[str]) -> tuple[str, str]:
+    """(original, rewrite) text of the changed lines; the whole span if nothing changed."""
+    idx = [j for j, (a, b) in enumerate(zip(original, lines)) if a != b] or range(len(lines))
+    return "\n".join(original[j] for j in idx), "\n".join(lines[j] for j in idx)
+
+
 def rhymes_with(original: str, rewrite: str) -> bool:
     """End word kept, or the rewritten line shares an end-rhyme key with the original."""
     return (end_word(original) == end_word(rewrite)
@@ -126,7 +133,10 @@ class Selector:
         usable = [(raw, lines) for raw, lines in candidates if lines is not None]
         if usable:
             texts = ["\n".join(lines) for _, lines in usable]
-            sims = self.similarity.pairwise(texts, ["\n".join(original)] * len(texts))
+            # similarity of the changed lines only: unchanged lines would push every candidate
+            # of a stanza to ~0.95 and make the 0.70 threshold meaningless
+            pairs = [changed_text(original, lines) for _, lines in usable]
+            sims = self.similarity.pairwise([b for _, b in pairs], [a for a, _ in pairs])
             toxs = self.toxicity.score(texts)
             base = self.fluency.score(list(original))
             fl = self.fluency.score([line for _, ls in usable for line in ls])

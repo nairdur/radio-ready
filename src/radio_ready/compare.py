@@ -7,9 +7,12 @@ only where a system has a valid rewrite.
 Metrics per (section, system):
   explicit_left    detected explicit words left in the rewrite (radio_ready.explicit)
   clean            explicit_left == 0
-  syl_exact        share of lines with the same syllable count as the original
-  syl_abs_diff     mean |syllables(original line) - syllables(rewrite line)|
-  rhyme_kept       share of lines whose end word is kept or rhymes (CMU rhyming part)
+  lines_changed    number of lines that differ from the original
+  syl_exact        share of changed lines with the same syllable count as the original
+  syl_abs_diff     mean |syllables(original) - syllables(rewrite)| over changed lines
+  rhyme_kept       share of changed lines whose end word is kept or rhymes (CMU rhyming part)
+                   (unchanged lines are left out of these three: copying a line is not a
+                   meter or rhyme success; NaN if nothing changed)
   clean_lines_kept share of original lines without an explicit word that are copied exactly
   slang_kept       share of benign slang tokens (vetting verdict not_explicit) in the original
                    that are still in the rewrite
@@ -60,16 +63,18 @@ def load_systems(ids: set[str]) -> dict[str, dict[str, list[str]]]:
 
 
 def line_metrics(original: list[str], rewrite: list[str], detector: ExplicitDetector) -> dict:
-    syl = [(syllables(a), syllables(b)) for a, b in zip(original, rewrite)]
+    changed = [(a, b) for a, b in zip(original, rewrite) if a != b]
+    syl = [(syllables(a), syllables(b)) for a, b in changed]
     clean_idx = [i for i, l in enumerate(original) if not detector.find(l)]
     slang = [(w, i) for i, l in enumerate(original) for w in slang_in(l)]
     return {
         "slang_kept": np.mean([w in tokenize(rewrite[i]) for w, i in slang]) if slang else np.nan,
         "explicit_left": len(detector.find("\n".join(rewrite))),
-        "syl_exact": np.mean([a == b for a, b in syl]),
-        "syl_abs_diff": np.mean([abs(a - b) for a, b in syl]),
-        "rhyme_kept": np.mean([end_rhyme_kept(a, b) if b else False
-                               for a, b in zip(original, rewrite)]),
+        "lines_changed": len(changed),
+        "syl_exact": np.mean([a == b for a, b in syl]) if syl else np.nan,
+        "syl_abs_diff": np.mean([abs(a - b) for a, b in syl]) if syl else np.nan,
+        "rhyme_kept": np.mean([end_rhyme_kept(a, b) if b else False for a, b in changed])
+        if changed else np.nan,
         "clean_lines_kept": np.mean([original[i] == rewrite[i] for i in clean_idx])
         if clean_idx else np.nan,
     }
@@ -113,11 +118,12 @@ def main() -> None:
 
     out = paths.COMPARISON_DIR / args.name
     out.mkdir(parents=True, exist_ok=True)
-    cols = ["id", "system", "clean", "explicit_left", "syl_exact", "syl_abs_diff", "rhyme_kept",
-            "clean_lines_kept", "slang_kept", "similarity", "aae_delta"]
+    cols = ["id", "system", "clean", "explicit_left", "lines_changed", "syl_exact", "syl_abs_diff",
+            "rhyme_kept", "clean_lines_kept", "slang_kept", "similarity", "aae_delta"]
     scores[cols].round(4).to_csv(out / "scores.csv", index=False)
     summary = scores.groupby("system").agg(
         sections=("id", "size"), clean=("clean", "mean"), explicit_left=("explicit_left", "mean"),
+        lines_changed=("lines_changed", "mean"),
         syl_exact=("syl_exact", "mean"), syl_abs_diff=("syl_abs_diff", "mean"),
         rhyme_kept=("rhyme_kept", "mean"), clean_lines_kept=("clean_lines_kept", "mean"),
         slang_kept=("slang_kept", "mean"),

@@ -29,7 +29,12 @@ src/radio_ready/
   kidzbop.py          Kidz Bop song sections and word stats
   genius.py           Genius cleaning, sections, sampling
   aae.py              AAE vernacular proportion
-  scoring.py          similarity and toxicity models
+  scoring.py          similarity, toxicity and fluency models
+  prompts.py          rewrite prompts and answer parsers
+  generate.py         local-model rewrites with candidate selection
+  pairs.py            SFT pairs from generations
+  commercial.py       copy-paste table for commercial LLMs
+  compare.py          side-by-side scores of rewrite systems
   text.py             normalization, syllables, stress, rhyme
   paths.py            file locations
   pipeline.py         runs all steps in order
@@ -70,6 +75,7 @@ python -m radio_ready.pipeline --from learned_lexicon
 | 5 | `kidzbop` | Kidz Bop, Genius, step 3 | `data/artifacts/kidzbop_*.csv`, `data/processed/kidzbop/{sections,pilot}.jsonl` |
 | 6 | `genius` | Genius, Kidz Bop, step 3 | `data/processed/genius_sections.jsonl` |
 | 7 | `aae` | step 6, TwitterAAE | adds `aae_proportion` to step 6 output |
+| 8 | `commercial` | steps 5, 6 | `data/commercial/{prompt.txt,commercial_table.csv}` |
 
 ### 2. Labels
 
@@ -269,53 +275,64 @@ Proportion of tokens from the African American English topic of the TwitterAAE m
 (Blodgett et al. 2016). `aae.vernacular_shift(scorer, original, rewrite)` returns the
 proportion before and after a rewrite.
 
-## Rewrite generation (pilot)
+## Rewrite generation
 
-Only **target lines** are rewritten: lines of a section in which the explicit-word detector
-(the same one that selects sections) finds a word. The model sees the whole section with each
-line's syllable count and rhyme letter, plus up to 4 lines before and after it; target lines are
-marked with the words found. All other lines are copied from the original.
-
-All generators use the same prompt, written out in full in `prompts.py` (`SYSTEM_PROMPT`,
-`INSTRUCTIONS`, `USER_TEMPLATE`, `BATCH_TEMPLATE`; version in `PROMPT_VERSION`). It asks for a
-radio edit that keeps meaning and context, meter (syllable count and stress), rhyme scheme
-(exact or slant), sound, and the artist's style, spelling and grammar, with no explicit words,
-censored or misspelled forms, sound-alikes or innuendo.
-
-### Local 7B
+`generate.py` rewrites sections with a local model; `pairs.py` turns the results into SFT pairs.
+Prompts are written out in full in `prompts.py`.
 
 ```bash
-python -m radio_ready.generate
+# pilot (Kidz Bop sections, default input)
+python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings --style stanza-free --samples 5
+# Genius sections for SFT pairs (--limit N for a partial run; interrupted runs resume)
+python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings --style stanza-free --samples 5   --input data/processed/genius_sections.jsonl
 ```
 
-Qwen2.5-7B-Instruct loaded in 4-bit (NF4, bitsandbytes) to fit an 8 GB GPU; Qwen3-14B fits
-with `--cpu-embeddings`. Default input: the Kidz Bop pilot
-(`data/processed/kidzbop/pilot.jsonl`). Prompt styles (`--style`):
+Qwen2.5-7B-Instruct (default) and Qwen3-14B load in 4-bit (NF4, bitsandbytes); on an 8 GB GPU
+Qwen3-14B needs `--cpu-embeddings`. Prompt styles (`--style`):
 
-| Style | Request | Hints |
+| Style | Request | Hints in the prompt |
 | --- | --- | --- |
 | `surgical` (default) | one per line with a detected word, 4 lines above and below as context | detected words |
-| `stanza` | one per 4-line stanza with a detected word; freer rewrite keeping flow and rhythm | detected words |
-| `surgical-free` | as `surgical`, but the whole line may be reworded | detected words, syllable count |
-| `stanza-free` | as `stanza`, lines may be reworded | detected words |
-| `plain` | whole section; model decides what radio would censor | none |
-| `annotated` | whole section with syllable counts, rhyme letters, REWRITE marks | all |
+| `surgical-free` | as `surgical`; the whole line may be reworded | detected words, syllable count |
+| `stanza` | one per 4-line stanza with a detected word | detected words |
+| `stanza-free` | as `stanza`; lines may be reworded | detected words |
+| `plain` | whole section; the model decides what radio would censor | none |
+| `annotated` | whole section with syllable counts, rhyme letters and REWRITE marks | all |
 
-`--samples N` draws N candidates per request (temperature 0.8) and keeps the best with the
-ParaDeHate filters: no detected explicit word, toxicity < 0.9, similarity to the original
-≥ 0.70. Among those, the best keeps the end rhymes, keeps every line within one syllable, and
-has the highest similarity × fluency (CoLA acceptability of each changed line relative to the
-original, the ParaDetox fluency model; it catches nonsense like "I should be a sad stuff").
-`surgical-free` and `stanza-free` allow whole lines to be reworded; with `--rhyme` the model
-first writes the rhyme pattern itself.
+Every style asks to keep the meaning, rhythm and syllable count, the end rhyme, the artist's
+voice, and slang, dialect, grammar and spelling. `--rhyme` (free styles) makes the model write
+the rhyme pattern before its answer; in the pilot it copied the example pattern and did not
+help.
+
+`--samples N` draws N candidates per request (temperature 1.0, top-p 0.9: top-p cuts the
+unlikely tail, the temperature varies the wording) and keeps the best:
+
+1. Filters (ParaDeHate): no detected explicit word, toxicity < 0.9, similarity of the changed
+   lines to their originals ≥ 0.70.
+2. Ranking: fewest broken end rhymes, every line within one syllable, then the highest
+   similarity × fluency, where fluency is the CoLA acceptability of each changed line relative
+   to its original (the ParaDetox fluency model). It is relative because lines in dialect score
+   low on both sides; it catches nonsense such as "I should be a sad stuff".
+
+Output: `outputs/generations/<name>.jsonl`, one record per section with the merged lines,
+`valid` (every request gave a usable answer), `passed` (every chosen candidate passed the
+filters) and every candidate with its scores. Genius sections reserved for commercial LLMs are
+skipped.
+
+### SFT pairs
 
 ```bash
-python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings --style stanza --samples 5
+python -m radio_ready.pairs qwen3-14b-4bit_genius_sections_v8-stanza-free_n5
 ```
 
-Output: `outputs/generations/<name>.jsonl` with the merged section, the changed lines, whether
-the chosen candidates passed the filters, and every candidate with its scores. Interrupted runs
-resume. Sections reserved for commercial LLMs are skipped.
+Writes `data/processed/pairs/<name>.jsonl`: `original` and `rewrite` lines, `changed` line
+indexes, `syllables` and `rhyme_scheme` of the original (control-token values),
+`rewrite_syllables`, `split` (Genius: by artist, 60/20/20 as in step 2; Kidz Bop: by song),
+model, prompt version and the chosen candidates' scores. Kept: valid, passed the filters, at
+least one line changed, no detected explicit word left. Reserved commercial-evaluation sections
+are never exported. Several generation files can be merged; the first file wins for a section.
+
+ParaDetox (the first SFT stage) is used as downloaded (`data/raw/paradetox`).
 
 ### Commercial LLMs (copy-paste)
 
@@ -345,8 +362,10 @@ python -m radio_ready.compare
 ```
 
 Scores Kidz Bop, every local generation file and every commercial model on the same sections:
-explicit words left, syllable match, end rhyme kept, clean lines copied unchanged, LaBSE
-similarity, AAE delta. Outputs in `outputs/comparison/<name>/`: `scores.csv`, `summary.csv`,
+explicit words left, lines changed, syllable match and end rhyme kept (over changed lines only,
+so copying a line is not counted as a success), clean lines copied unchanged, benign slang
+kept, LaBSE similarity, AAE delta. The evaluation models (LaBSE, s-nlp toxicity) differ from
+the models that select candidates, so a rewrite is not scored by the model that picked it. Outputs in `outputs/comparison/<name>/`: `scores.csv`, `summary.csv`,
 `side_by_side.md`, and a blinded `ranking.csv` with `ranking_key.csv` for human ranking.
 
 ## Scoring models
@@ -354,8 +373,8 @@ similarity, AAE delta. Outputs in `outputs/comparison/<name>/`: `scores.csv`, `s
 | Model | Use | Threshold |
 | --- | --- | --- |
 | `sentence-transformers/all-distilroberta-v1` | similarity filter | cosine ≥ 0.70 (ParaDeHate) |
-| `unitary/unbiased-toxic-roberta` | toxicity filter | ≥ 0.9 (ParaDeHate) |
-| `cointegrated/roberta-large-cola-krishna2020` | fluency, candidate ranking (relative to the original line) | — |
+| `unitary/unbiased-toxic-roberta` | toxicity filter | rewrite must score < 0.9 (ParaDeHate) |
+| `cointegrated/roberta-large-cola-krishna2020` | fluency, candidate ranking (drop relative to the original line) | — |
 | `sentence-transformers/LaBSE` | meaning-preservation metric | — |
 | `s-nlp/roberta_toxicity_classifier` | clean-output metric | — |
 
@@ -393,7 +412,8 @@ code keep their own licenses:
 | `sentence-transformers/LaBSE` | Apache-2.0 |
 | `s-nlp/roberta_toxicity_classifier` | OpenRAIL++ |
 | `distilroberta-base` | Apache-2.0 |
-| `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-7B-Instruct` | Apache-2.0 |
+| `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen3-14B` | Apache-2.0 |
+| `cointegrated/roberta-large-cola-krishna2020` | see model card |
 
 ### Code
 
