@@ -21,8 +21,8 @@ word in the rewrite. Genius sections reserved for commercial LLMs are never expo
 are an evaluation set). Splits: Genius pairs by artist (60/20/20, the same hash as
 radio_ready.labels), Kidz Bop pairs keep their song split.
 
-Human edits: annotations/pair_edits.csv (committed, never overwritten; written by
-radio_ready.vet). Every run adds a row for each rewritten line not yet in it (kept and dropped
+Human edits: annotations/edits/<name>.csv, one sheet per export (committed, never
+overwritten; written by radio_ready.vet <name>). Every run adds a row for each rewritten line not yet in it (kept and dropped
 sections alike). No lyrics are stored: the model rewrite and your edit are word-level diffs
 against the original line, which is read from the section records when the sheet is loaded.
   id, line (1-based), artist, title, status (kept / dropped: reason)
@@ -48,6 +48,7 @@ Run:  python -m radio_ready.pairs GENERATION [GENERATION ...] [--name NAME]
       python -m radio_ready.pairs solid_pilot_solid-v1
       python -m radio_ready.pairs --choices
       python -m radio_ready.pairs --rebuild         # full pairs from every pairs/*.patch.jsonl
+      python -m radio_ready.pairs commercial_claude --include-reserved --require-approval
 """
 
 import argparse
@@ -65,18 +66,22 @@ from radio_ready.linediff import apply, diff
 PAIRS_DIR = paths.ROOT / "pairs"  # committed: the deliverable
 SECTION_FILES = {"genius": paths.GENIUS_SECTIONS_JSONL,
                  "kidzbop": paths.KIDZBOP_DIR / "sections.jsonl"}
-EDITS_CSV = paths.ANNOTATIONS / "pair_edits.csv"
+EDITS_DIR = paths.ANNOTATIONS / "edits"  # one sheet per export: edits/<name>.csv
 EDIT_COLUMNS = ["id", "line", "artist", "title", "status", "rewrite_diff", "edit_diff",
                 "verdict", "drop", "note"]
 DROP_VALUES = {"y", "yes", "x", "1", "drop"}
 APPROVE = {"like", "superlike"}
 
 
-def read_edits() -> list[dict]:
+def sheet_path(name: str) -> Path:
+    return EDITS_DIR / f"{name}.csv"
+
+
+def read_edits(sheet: Path) -> list[dict]:
     """Sheet rows as stored; call fill_text() to add original / rewrite / edit text."""
-    if not EDITS_CSV.exists():
+    if not sheet.exists():
         return []
-    with open(EDITS_CSV, encoding="utf-8-sig", newline="") as f:
+    with open(sheet, encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
 
 
@@ -95,7 +100,7 @@ def fill_text(rows: list[dict], lines_of) -> None:
             r[out] = apply(lines[n], json.loads(r[col])) if r.get(col) else ""
 
 
-def write_edits(rows: list[dict]) -> None:
+def write_edits(rows: list[dict], sheet: Path) -> None:
     """Store rows with rewrite and edit as diffs against the original line (no lyrics)."""
     out = []
     for r in rows:
@@ -109,13 +114,13 @@ def write_edits(rows: list[dict]) -> None:
                 row[col] = json.dumps(diff(r["original"], value), ensure_ascii=False) \
                     if value else ""
         out.append(row)
-    EDITS_CSV.parent.mkdir(parents=True, exist_ok=True)
-    tmp = EDITS_CSV.with_suffix(".csv.tmp")
+    sheet.parent.mkdir(parents=True, exist_ok=True)
+    tmp = sheet.with_suffix(".csv.tmp")
     with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=EDIT_COLUMNS, quoting=csv.QUOTE_ALL)
         w.writeheader()
         w.writerows({k: r.get(k, "") for k in EDIT_COLUMNS} for r in out)
-    tmp.replace(EDITS_CSV)
+    tmp.replace(sheet)
 
 
 CHOICES_CSV = paths.ANNOTATIONS / "noise_choices.csv"
@@ -269,6 +274,11 @@ def main() -> None:
                         help="export the versions chosen in annotations/noise_choices.csv")
     parser.add_argument("--rebuild", action="store_true",
                         help="full pairs from pairs/*.patch.jsonl and the section records")
+    parser.add_argument("--include-reserved", action="store_true",
+                        help="keep the Genius sections reserved for commercial evaluation")
+    parser.add_argument("--require-approval", action="store_true",
+                        help="a section becomes a pair only when all its rows are liked, "
+                             "superliked or edited (e.g. commercial answers)")
     args = parser.parse_args()
     if args.rebuild:
         rebuild()
@@ -278,8 +288,11 @@ def main() -> None:
     if args.choices and not args.name:
         args.name = "noise_chosen"
 
-    sections, reserved, detector = load_sections(), reserved_ids(), ExplicitDetector()
-    edits = read_edits()
+    name = args.name or Path(args.generations[0]).name.removesuffix(".jsonl")
+    sheet = sheet_path(name)
+    sections, detector = load_sections(), ExplicitDetector()
+    reserved = set() if args.include_reserved else reserved_ids()
+    edits = read_edits(sheet)
     fill_text(edits, lambda sid: sections[sid][1]["lines"] if sid in sections else None)
     by_line = {(r["id"], int(r["line"])): r for r in edits if r.get("line", "").isdigit()}
     drop_ids = {r["id"] for r in edits if r.get("drop", "").strip().lower() in DROP_VALUES
@@ -294,6 +307,8 @@ def main() -> None:
             else list(rec["lines"])
         reason = (None if gen.get("valid") and (chosen or gen.get("passed") is not False)
                   else "no usable answer" if not gen.get("valid") else "failed filters")
+        if reason is None and args.require_approval:
+            reason = "not approved yet"
         # sheet rows for every rewritten line (and every target line without an answer)
         rows = sorted({i for i, (a, b) in enumerate(zip(rec["lines"], lines)) if a != b}
                       | set(gen.get("targets", [])))
@@ -302,7 +317,8 @@ def main() -> None:
                 row = {"id": gen["id"], "line": str(i + 1), "artist": rec["artist"],
                        "title": rec["title"], "original": rec["lines"][i],
                        "rewrite": lines[i] if lines[i] != rec["lines"][i] else "",
-                       "status": "kept" if reason is None else f"dropped: {reason}"}
+                       "status": ("kept" if reason is None else "needs approval"
+                                  if reason == "not approved yet" else f"dropped: {reason}")}
                 by_line[(gen["id"], i + 1)] = row
                 new_rows.append(row)
         edited, verdicts, approved_all = [], {}, True
@@ -331,15 +347,15 @@ def main() -> None:
             pair["human_verdicts"] = verdicts
             pairs.append(pair)
             seen.add(gen["id"])
-    write_edits(edits + new_rows)
+    write_edits(edits + new_rows, sheet)
 
-    name = args.name or Path(args.generations[0]).name.removesuffix(".jsonl")
     out = write_pairs(name, pairs)
     print(f"pairs: {len(pairs)} {dict(Counter(p['split'] for p in pairs))}, "
           f"with human edits: {sum(bool(p['human_edited']) for p in pairs)}")
     print(f"dropped: {dict(dropped)}")
     print(f"output: {out} (side by side: {name}.md, committed patch: {name}.patch.jsonl)")
-    print(f"edit sheet: {EDITS_CSV} ({len(new_rows)} new rows)")
+    print(f"edit sheet: {sheet} ({len(new_rows)} new rows); vet: python -m radio_ready.vet "
+          f"{name}")
 
 
 if __name__ == "__main__":

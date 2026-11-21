@@ -178,12 +178,36 @@ def load_rewrites(ids: set[str] | None = None) -> dict[str, dict[str, list[str]]
     return systems
 
 
+def export_generations() -> None:
+    """Each filled model column as outputs/generations/commercial_<model>.jsonl (the
+    radio_ready.generate format), so radio_ready.pairs and radio_ready.vet can use it."""
+    detector = ExplicitDetector()
+    records = {r["id"]: r for p in SOURCES.values() for r in read_jsonl(p)}
+    paths.GENERATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    for model, rewrites in load_rewrites().items():
+        out = paths.GENERATIONS_DIR / f"commercial_{model}.jsonl"
+        with open(out, "w", encoding="utf-8") as f:
+            for sid, lines in rewrites.items():
+                f.write(json.dumps({
+                    "id": sid, "model": model, "prompt_version": "commercial-table",
+                    "style": "commercial", "targets": sorted(target_lines(records[sid],
+                                                                           detector)),
+                    "lines": lines, "valid": True, "passed": True, "units": []},
+                    ensure_ascii=False) + "\n")
+        print(f"{model}: {len(rewrites)} sections -> {out}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create or extend the commercial-LLM table.")
     parser.add_argument("--genius-sections", type=int, default=50)
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS,
                         help="one output column per model; existing columns are kept")
+    parser.add_argument("--export", action="store_true",
+                        help="write the filled answers as generation files for pairs / vet")
     args = parser.parse_args()
+    if args.export:
+        export_generations()
+        return
     build(args.genius_sections, args.models)
 
 

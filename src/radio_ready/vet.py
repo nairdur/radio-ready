@@ -1,7 +1,8 @@
 """Quick human vetting of synthetic rewrites, one line at a time (tkinter, no extra installs).
 
-Reads and writes annotations/pair_edits.csv (radio_ready.pairs; lines are stored as diffs and
-filled in from the section records). Each screen shows one row:
+Reads and writes one sheet, annotations/edits/<name>.csv (radio_ready.pairs; lines are stored
+as diffs and filled in from the section records). Without a name it opens the most recently
+updated sheet. Each screen shows one row:
 the original line with its explicit words highlighted, and the proposed rewrite in an edit
 field. Change the text if you want (it is saved as your edit), then give a verdict:
 
@@ -27,7 +28,7 @@ version are shown. Press 1-9 for the best version, 0 for none; Up / Down go back
 Choices go to annotations/noise_choices.csv (id, choice = generation name or "none"), which
 `python -m radio_ready.pairs --choices` turns into pairs.
 
-Run:  python -m radio_ready.vet [--all]
+Run:  python -m radio_ready.vet [NAME] [--all]     # e.g. commercial_claude
       python -m radio_ready.vet --choose "*noise*"
 """
 
@@ -44,8 +45,8 @@ from tkinter import font as tkfont
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.pairs import (
-    CHOICES_CSV, EDITS_CSV, SECTION_FILES, fill_text, read_choices, read_edits, write_choices,
-    write_edits,
+    CHOICES_CSV, EDITS_DIR, SECTION_FILES, fill_text, read_choices, read_edits, sheet_path,
+    write_choices, write_edits,
 )
 from radio_ready.text import rhyme_words, syllables, word_syllables
 
@@ -88,14 +89,14 @@ def load_sections(ids: set[str]) -> dict[str, dict]:
 
 
 class App:
-    def __init__(self, root, rows, order, sections, detector):
-        self.root, self.rows, self.order = root, rows, order
+    def __init__(self, root, rows, order, sections, detector, sheet):
+        self.root, self.rows, self.order, self.sheet = root, rows, order, sheet
         self.sections, self.detector = sections, detector
         self.pos, self.history, self.context = 0, [], False
         self.suggestions, self.results, self.pending = [], queue.Queue(), None
         base = tkfont.nametofont("TkDefaultFont").actual()["family"]
         big = (base, 15)
-        root.title("RadioReady vetting")
+        root.title(f"RadioReady vetting: {sheet.stem}")
         root.geometry("1000x430")
         self.header = tk.Label(root, anchor="w", font=(base, 11))
         self.header.pack(fill="x", padx=12, pady=(10, 2))
@@ -224,7 +225,7 @@ class App:
         r["edit"] = text if text and text != r.get("rewrite", "") else ""
         r["verdict"] = verdict
         try:
-            write_edits(self.rows)
+            write_edits(self.rows, self.sheet)
             self.status.config(text=f"saved: line {r['line']} {verdict}")
         except PermissionError:
             self.status.config(text="could not save: close the sheet in Excel (kept in memory)")
@@ -428,6 +429,8 @@ def choose_items(pattern: str, show_all: bool, choices: dict) -> list[tuple[str,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vet synthetic rewrites line by line.")
+    parser.add_argument("sheet", nargs="?", default=None,
+                        help="sheet name in annotations/edits (default: most recently updated)")
     parser.add_argument("--all", action="store_true", help="also show rows already vetted")
     parser.add_argument("--choose", default=None, metavar="PATTERN",
                         help='choose the best version per section, e.g. "*noise*"')
@@ -443,9 +446,17 @@ def main() -> None:
         root.mainloop()
         return
 
-    rows = read_edits()
+    sheets = sorted(EDITS_DIR.glob("*.csv"), key=lambda p: p.stat().st_mtime)
+    if args.sheet:
+        sheet = sheet_path(args.sheet)
+    elif sheets:
+        sheet = sheets[-1]
+    else:
+        raise SystemExit(f"no sheets in {EDITS_DIR}; run radio_ready.pairs first")
+    print(f"sheet: {sheet.stem} (others: {', '.join(p.stem for p in sheets if p != sheet)})")
+    rows = read_edits(sheet)
     if not rows:
-        raise SystemExit(f"no rows in {EDITS_CSV}; run radio_ready.pairs first")
+        raise SystemExit(f"no rows in {sheet}; run radio_ready.pairs first")
     sections = load_sections({r["id"] for r in rows})
     fill_text(rows, lambda sid: sections.get(sid, {}).get("lines"))
     counts, total = word_rarity()
@@ -453,7 +464,7 @@ def main() -> None:
               for k, r in enumerate(rows) if args.all or not r.get("verdict")]
     order = [k for _, k in sorted(scored, reverse=True)]
     root = tk.Tk()
-    App(root, rows, order, sections, ExplicitDetector())
+    App(root, rows, order, sections, ExplicitDetector(), sheet)
     root.mainloop()
 
 

@@ -363,7 +363,9 @@ original end word or its rhyme partners (`rhymes.py`: CMU rhymes of words common
 lyrics, ranked by masked-LM fit in the line and meaning; sound-alikes of the explicit word and
 function words are left out; `python -m radio_ready.rhymes --build` once). Distinctive rewrites
 come first, generic ones ("stuff", "things") last. Verdicts and edits go to
-`annotations/pair_edits.csv` (committed; rewrites and edits are stored as diffs against the
+`annotations/edits/<name>.csv`, one sheet per export (`python -m radio_ready.vet <name>`;
+without a name the most recently updated sheet opens; committed; rewrites and edits are stored
+as diffs against the
 original line, so it holds no lyrics), which `pairs.py` applies: a dislike leaves the section
 out, a section the filters dropped comes back when all its lines are liked or edited.
 
