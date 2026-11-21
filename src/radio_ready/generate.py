@@ -18,6 +18,9 @@ Output:  outputs/generations/<name>.jsonl, one record per section:
   surgical-free, stanza-free  (v8) like surgical / stanza, but lines may be reworded as a
              whole, keeping meaning, syllables, rhythm and end rhyme; --rhyme makes the model
              write the rhyme pattern first (end words it rhymes with / letters like AABB)
+  noise-vowels, noise-gibberish, noise-blank  (v9) per 4-line stanza; detected explicit words
+             are replaced by made-up sounds or blanks (radio_ready.noise) and the model fills
+             them with real words; it never sees the explicit words
 
 Candidates: --samples N draws N answers per request (temperature 1.0 with top-p 0.9 when
 N > 1: top-p drops the unlikely tail, so the higher temperature varies the wording without
@@ -47,6 +50,7 @@ Run:  python -m radio_ready.generate [--model NAME] [--input FILE] [--limit N]
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 
@@ -57,9 +61,10 @@ from radio_ready import paths
 from radio_ready.commercial import reserved_ids
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.prompts import (
-    FREE_VERSION, PLAIN_VERSION, PROMPT_VERSION, STANZA_VERSION, SURGICAL_CONTEXT,
+    FREE_VERSION, NOISE_VERSION, PLAIN_VERSION, PROMPT_VERSION, STANZA_VERSION,
+    SURGICAL_CONTEXT,
     SURGICAL_VERSION, model_rhyme, parse_plain, parse_rewrites, parse_stanza, parse_surgical,
-    parse_surgical_free, plain_prompt, single_prompt, stanza_free_prompt, stanza_prompt, stanzas,
+    noise_prompt, parse_surgical_free, plain_prompt, single_prompt, stanza_free_prompt, stanza_prompt, stanzas,
     surgical_free_prompt, surgical_prompt, target_lines,
 )
 from radio_ready.scoring import (
@@ -68,9 +73,19 @@ from radio_ready.scoring import (
 from radio_ready.text import end_word, line_rhyme_keys, syllables
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+_NOISE_DETECTOR = None
+
+
+def noise_detector() -> ExplicitDetector:
+    global _NOISE_DETECTOR
+    if _NOISE_DETECTOR is None:
+        _NOISE_DETECTOR = ExplicitDetector()
+    return _NOISE_DETECTOR
 VERSIONS = {"annotated": PROMPT_VERSION, "plain": PLAIN_VERSION, "surgical": SURGICAL_VERSION,
             "stanza": STANZA_VERSION, "surgical-free": f"{FREE_VERSION}-surgical-free",
-            "stanza-free": f"{FREE_VERSION}-stanza-free"}
+            "stanza-free": f"{FREE_VERSION}-stanza-free",
+            "noise-vowels": f"{NOISE_VERSION}-vowels", "noise-gibberish": f"{NOISE_VERSION}-gibberish",
+            "noise-blank": f"{NOISE_VERSION}-blank"}
 SAMPLING_TEMPERATURE = 1.0
 SAMPLING_TOP_P = 0.9
 MAX_SYLLABLE_DIFF = 1  # per line, before candidates are ranked by similarity x fluency
@@ -210,6 +225,15 @@ def units(record: dict, targets: dict, style: str, context: int, rhyme: bool = F
             return (i, i + 1, lambda lines: surgical_free_prompt(record, lines, i, targets[i],
                                                                  rhyme, context), parse)
         return [one_free(i) for i in sorted(targets)]
+    if style.startswith("noise-"):
+        mode = style.split("-", 1)[1]
+        detector = noise_detector()
+
+        def chunk_noise(start, end):
+            return (start, end,
+                    lambda lines: noise_prompt(record, lines, start, end, mode, detector),
+                    lambda raw: parse_stanza(re.sub(r"[{}*]", "", raw), end - start))
+        return [chunk_noise(s, e) for s, e in stanzas(record, targets)]
     if style == "stanza-free":
         def chunk_free(start, end):
             words = sorted({w for t in targets if start <= t < end for w in targets[t]})

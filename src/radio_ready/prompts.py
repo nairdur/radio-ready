@@ -458,3 +458,43 @@ def model_rhyme(text: str) -> str | None:
         if r.lower().startswith("rhyme"):
             return r.split(":", 1)[-1].strip().strip("*").strip() or None
     return None
+
+
+# ---- v9 noise: explicit words replaced by made-up sounds (radio_ready.noise) ----------------
+
+NOISE_VERSION = "v9-noise"
+
+NOISE_TEMPLATE = """\
+{n} lines from "{title}" by {artist}:
+
+{lines}
+
+Some words in these lines were replaced by made-up sounds, shown in curly braces. Write the \
+lines with each made-up sound replaced by real words, so the lines make sense in the song. \
+Keep:
+- the meaning, the attitude and the artist's voice,
+- the rhythm: each replacement has about the same number of syllables as the made-up sound,
+- the end rhyme of each line,
+- every other word, the slang, dialect, grammar and spelling as written.
+Use only words radio would play.
+
+Answer with the {n} lines, numbered as above, without curly braces, and nothing else."""
+
+BLANK_NOTE = "Some words in these lines were replaced by blanks (___) with their syllable count"
+
+
+def noise_prompt(record: dict, lines: list[str], start: int, end: int, mode: str,
+                 detector) -> list[dict]:
+    from radio_ready.noise import noise_lines
+
+    n = end - start
+    noisy = noise_lines(lines[start:end], f"{record['id']}:{start}", mode, detector)
+    rows = "\n".join(f"{j + 1}. {noisy[j]}" for j in range(n))
+    user = NOISE_TEMPLATE.format(n=n, title=record["title"], artist=record["artist"], lines=rows)
+    if mode == "blank":
+        user = user.replace(
+            "Some words in these lines were replaced by made-up sounds, shown in curly braces",
+            BLANK_NOTE + ", shown in curly braces").replace(
+            "each made-up sound replaced", "each blank filled").replace(
+            "as the made-up sound", "as given")
+    return [{"role": "system", "content": PLAIN_SYSTEM}, {"role": "user", "content": user}]
