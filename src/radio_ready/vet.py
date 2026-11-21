@@ -28,12 +28,19 @@ version are shown. Press 1-9 for the best version, 0 for none; Up / Down go back
 Choices go to annotations/noise_choices.csv (id, choice = generation name or "none"), which
 `python -m radio_ready.pairs --choices` turns into pairs.
 
-Run:  python -m radio_ready.vet [NAME] [--all]     # e.g. commercial_claude
+Start window (vet.bat, or python -m radio_ready.vet with no arguments): every sheet with
+its progress, the noise versions to choose from, and finished runs without a sheet; Enter or
+double-click opens one, Export pairs writes its pairs (radio_ready.pairs with the right
+options). Closing a vetting window returns to the list.
+
+Run:  vet.bat                                       # start window
+      python -m radio_ready.vet [NAME] [--all]     # one sheet, e.g. commercial_claude
       python -m radio_ready.vet --choose "*noise*"
 """
 
 import argparse
 import json
+import sys
 import math
 import queue
 import re
@@ -427,44 +434,175 @@ def choose_items(pattern: str, show_all: bool, choices: dict) -> list[tuple[str,
     return [(sid, v[:9]) for sid, v in by_id.items() if show_all or sid not in choices]
 
 
+NOISE_PATTERN = "*noise*"
+
+
+def sheet_rows(sheet) -> tuple[list[dict], dict]:
+    rows = read_edits(sheet)
+    sections = load_sections({r["id"] for r in rows})
+    fill_text(rows, lambda sid: sections.get(sid, {}).get("lines"))
+    return rows, sections
+
+
+def open_sheet(window, sheet, show_all: bool = False) -> bool:
+    rows, sections = sheet_rows(sheet)
+    if not rows:
+        return False
+    counts, total = word_rarity()
+    scored = [(uniqueness(r["original"], r.get("edit") or r.get("rewrite", ""), counts, total), k)
+              for k, r in enumerate(rows) if show_all or not r.get("verdict")]
+    order = [k for _, k in sorted(scored, reverse=True)]
+    App(window, rows, order, sections, ExplicitDetector(), sheet)
+    return True
+
+
+def open_choose(window, pattern: str = NOISE_PATTERN, show_all: bool = False) -> bool:
+    choices = read_choices()
+    items = choose_items(pattern, show_all, choices)
+    if not items:
+        return False
+    ChooseApp(window, items, choices, load_sections({s for s, _ in items}), ExplicitDetector())
+    return True
+
+
+def export_args(name: str) -> list[str]:
+    """radio_ready.pairs arguments for a sheet: commercial answers need approval and may use
+    the reserved sections; noise_chosen comes from the noise choices."""
+    if name == "noise_chosen":
+        return ["--choices"]
+    if name.startswith("commercial_"):
+        return [name, "--include-reserved", "--require-approval"]
+    return [name]
+
+
+def export(name: str) -> str:
+    """Run the radio_ready.pairs export in-process and return what it printed."""
+    import contextlib
+    import io
+
+    from radio_ready import pairs
+
+    out, argv = io.StringIO(), sys.argv
+    sys.argv = ["pairs", *export_args(name)]
+    try:
+        with contextlib.redirect_stdout(out):
+            pairs.main()
+    finally:
+        sys.argv = argv
+    return out.getvalue()
+
+
+class Launcher:
+    """Start window: pick a sheet (or the noise versions, or a new run) and open or export."""
+
+    def __init__(self, root):
+        self.root = root
+        root.title("RadioReady vetting")
+        root.geometry("720x420")
+        base = tkfont.nametofont("TkDefaultFont").actual()["family"]
+        tk.Label(root, text="Double-click or Enter to open; Export pairs writes the pairs.",
+                 anchor="w", fg="#555").pack(fill="x", padx=12, pady=(10, 4))
+        self.list = tk.Listbox(root, font=(base, 12), activestyle="dotbox")
+        self.list.pack(fill="both", expand=True, padx=12)
+        self.list.bind("<Double-Button-1>", lambda e: self.open())
+        self.list.bind("<Return>", lambda e: self.open())
+        bar = tk.Frame(root)
+        bar.pack(fill="x", padx=12, pady=8)
+        tk.Button(bar, text="Open", width=14, command=self.open).pack(side="left")
+        tk.Button(bar, text="Open (all rows)", width=14,
+                  command=lambda: self.open(show_all=True)).pack(side="left", padx=8)
+        tk.Button(bar, text="Export pairs", width=14, command=self.export).pack(side="left")
+        self.status = tk.Label(root, anchor="w", fg="#777", justify="left", wraplength=690)
+        self.status.pack(fill="x", padx=12, pady=(0, 10))
+        self.refresh()
+
+    def entries(self) -> list[tuple[str, str, str]]:
+        """(kind, name, label): sheets newest first, noise versions, runs without a sheet."""
+        found = []
+        sheets = sorted(EDITS_DIR.glob("*.csv"), key=lambda p: -p.stat().st_mtime)
+        for sheet in sheets:
+            rows = read_edits(sheet)
+            done = sum(bool(r.get("verdict")) for r in rows)
+            found.append(("sheet", sheet.stem, f"{sheet.stem}    {done}/{len(rows)} lines vetted"))
+        noise = choose_items(NOISE_PATTERN, True, {})
+        if noise:
+            chosen = read_choices()
+            done = sum(1 for sid, _ in noise if sid in chosen)
+            found.append(("choose", NOISE_PATTERN,
+                          f"Noise versions: pick the best    {done}/{len(noise)} sections"))
+        names = {s.stem for s in sheets}
+        for gen in sorted(paths.GENERATIONS_DIR.glob("*.jsonl"),
+                          key=lambda p: -p.stat().st_mtime):
+            stem = gen.name.removesuffix(".jsonl")
+            if stem not in names and (stem.startswith(("solid_", "commercial_"))):
+                found.append(("new", stem, f"{stem}    new run: Export pairs to create its sheet"))
+        return found
+
+    def refresh(self) -> None:
+        self.items = self.entries()
+        self.list.delete(0, "end")
+        for _, _, label in self.items:
+            self.list.insert("end", label)
+        if self.items:
+            self.list.selection_set(0)
+            self.list.activate(0)
+        self.list.focus_set()
+
+    def selected(self):
+        sel = self.list.curselection()
+        return self.items[sel[0]] if sel else None
+
+    def open(self, show_all: bool = False) -> None:
+        item = self.selected()
+        if not item:
+            return
+        kind, name, _ = item
+        if kind == "new":
+            self.status.config(text="Export pairs first: that creates the sheet for this run.")
+            return
+        window = tk.Toplevel(self.root)
+        ok = (open_choose(window, name, show_all) if kind == "choose"
+              else open_sheet(window, sheet_path(name), show_all))
+        if not ok:
+            window.destroy()
+            self.status.config(text="Nothing left to vet here (use Open (all rows) to revisit).")
+            return
+        window.protocol("WM_DELETE_WINDOW", lambda: (window.destroy(), self.refresh()))
+
+    def export(self) -> None:
+        item = self.selected()
+        if not item:
+            return
+        kind, name, _ = item
+        name = "noise_chosen" if kind == "choose" else name
+        self.status.config(text=f"exporting {name} ...")
+        self.root.update()
+        try:
+            text = export(name)
+        except Exception as e:  # noqa: BLE001 (shown in the window)
+            text = f"export failed: {e}"
+        self.status.config(text=text.strip())
+        self.refresh()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vet synthetic rewrites line by line.")
     parser.add_argument("sheet", nargs="?", default=None,
-                        help="sheet name in annotations/edits (default: most recently updated)")
+                        help="sheet name in annotations/edits (default: the start window)")
     parser.add_argument("--all", action="store_true", help="also show rows already vetted")
     parser.add_argument("--choose", default=None, metavar="PATTERN",
                         help='choose the best version per section, e.g. "*noise*"')
     args = parser.parse_args()
 
-    if args.choose:
-        choices = read_choices()
-        items = choose_items(args.choose, args.all, choices)
-        if not items:
-            raise SystemExit(f"nothing to choose for {args.choose!r}")
-        root = tk.Tk()
-        ChooseApp(root, items, choices, load_sections({s for s, _ in items}), ExplicitDetector())
-        root.mainloop()
-        return
-
-    sheets = sorted(EDITS_DIR.glob("*.csv"), key=lambda p: p.stat().st_mtime)
-    if args.sheet:
-        sheet = sheet_path(args.sheet)
-    elif sheets:
-        sheet = sheets[-1]
-    else:
-        raise SystemExit(f"no sheets in {EDITS_DIR}; run radio_ready.pairs first")
-    print(f"sheet: {sheet.stem} (others: {', '.join(p.stem for p in sheets if p != sheet)})")
-    rows = read_edits(sheet)
-    if not rows:
-        raise SystemExit(f"no rows in {sheet}; run radio_ready.pairs first")
-    sections = load_sections({r["id"] for r in rows})
-    fill_text(rows, lambda sid: sections.get(sid, {}).get("lines"))
-    counts, total = word_rarity()
-    scored = [(uniqueness(r["original"], r.get("edit") or r.get("rewrite", ""), counts, total), k)
-              for k, r in enumerate(rows) if args.all or not r.get("verdict")]
-    order = [k for _, k in sorted(scored, reverse=True)]
     root = tk.Tk()
-    App(root, rows, order, sections, ExplicitDetector(), sheet)
+    if args.choose:
+        if not open_choose(root, args.choose, args.all):
+            raise SystemExit(f"nothing to choose for {args.choose!r}")
+    elif args.sheet:
+        if not open_sheet(root, sheet_path(args.sheet), args.all):
+            raise SystemExit(f"no rows in {sheet_path(args.sheet)}")
+    else:
+        Launcher(root)
     root.mainloop()
 
 
