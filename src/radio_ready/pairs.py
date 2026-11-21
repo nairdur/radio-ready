@@ -2,7 +2,12 @@
 
 Inputs:  outputs/generations/<name>.jsonl (radio_ready.generate / radio_ready.rewrite), and
          the section records they were generated from (Genius sections, Kidz Bop sections)
-Output:  pairs/<name>.jsonl (committed), one pair per section, and pairs/<name>.md:
+Outputs, in pairs/:
+  <name>.patch.jsonl  committed, no lyrics: per pair the ids, split, how it was made and a
+                      word-level diff of each changed line (radio_ready.linediff)
+  <name>.jsonl        full pairs, gitignored (lyrics); rebuilt anywhere with --rebuild from the
+  <name>.md           patches and the section records (download + kidzbop / genius steps)
+A full pair:
   id, source (genius / kidzbop), artist, title, section_header, split
   original           the explicit section lines
   rewrite            the radio edit lines (same number of lines)
@@ -16,10 +21,13 @@ word in the rewrite. Genius sections reserved for commercial LLMs are never expo
 are an evaluation set). Splits: Genius pairs by artist (60/20/20, the same hash as
 radio_ready.labels), Kidz Bop pairs keep their song split.
 
-Human edits: annotations/pair_edits.csv (committed, edited by hand, never overwritten). Every
-run adds a row for each rewritten line not yet in it (kept and dropped sections alike):
-  id, line (1-based), artist, title, status (kept / dropped: reason), original, rewrite
-  edit     your line; replaces the rewrite (blank: keep the rewrite)
+Human edits: annotations/pair_edits.csv (committed, never overwritten; written by
+radio_ready.vet). Every run adds a row for each rewritten line not yet in it (kept and dropped
+sections alike). No lyrics are stored: the model rewrite and your edit are word-level diffs
+against the original line, which is read from the section records when the sheet is loaded.
+  id, line (1-based), artist, title, status (kept / dropped: reason)
+  rewrite_diff  the model's rewrite of the line
+  edit_diff     your line; replaces the rewrite (blank: keep the rewrite)
   verdict  like / superlike / dislike (written by radio_ready.vet, or typed)
   drop     y to leave the whole section out
   note     free text
@@ -29,7 +37,8 @@ Rows can also be added by hand for other lines of a section (id and line). Rules
     or edited (human approval overrides the filters), and nothing explicit is left;
   - edits replace the rewrite in every case.
 Pairs list edited line indexes in `human_edited` and line verdicts in `human_verdicts`.
-Close the file in Excel before running.
+Sheets in the older layout (full original / rewrite / edit text columns) are read and
+converted on the next write.
 
 Chosen versions: `--choices` exports the version picked per section in
 annotations/noise_choices.csv (radio_ready.vet --choose; a pick counts as human approval, so
@@ -38,6 +47,7 @@ the filters do not drop it). Output name: noise_chosen.
 Run:  python -m radio_ready.pairs GENERATION [GENERATION ...] [--name NAME]
       python -m radio_ready.pairs solid_pilot_solid-v1
       python -m radio_ready.pairs --choices
+      python -m radio_ready.pairs --rebuild         # full pairs from every pairs/*.patch.jsonl
 """
 
 import argparse
@@ -50,31 +60,61 @@ from radio_ready import paths
 from radio_ready.commercial import reserved_ids
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.labels import artist_split
+from radio_ready.linediff import apply, diff
 
 PAIRS_DIR = paths.ROOT / "pairs"  # committed: the deliverable
 SECTION_FILES = {"genius": paths.GENIUS_SECTIONS_JSONL,
                  "kidzbop": paths.KIDZBOP_DIR / "sections.jsonl"}
 EDITS_CSV = paths.ANNOTATIONS / "pair_edits.csv"
-EDIT_COLUMNS = ["id", "line", "artist", "title", "status", "original", "rewrite", "edit",
+EDIT_COLUMNS = ["id", "line", "artist", "title", "status", "rewrite_diff", "edit_diff",
                 "verdict", "drop", "note"]
 DROP_VALUES = {"y", "yes", "x", "1", "drop"}
 APPROVE = {"like", "superlike"}
 
 
 def read_edits() -> list[dict]:
+    """Sheet rows as stored; call fill_text() to add original / rewrite / edit text."""
     if not EDITS_CSV.exists():
         return []
     with open(EDITS_CSV, encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
 
 
+def fill_text(rows: list[dict], lines_of) -> None:
+    """Add original, rewrite and edit text to rows; lines_of(section id) -> lines or None."""
+    for r in rows:
+        if r.get("original"):
+            continue  # older layout with full text
+        lines = lines_of(r["id"])
+        n = int(r["line"]) - 1 if str(r.get("line", "")).isdigit() else -1
+        if not lines or not 0 <= n < len(lines):
+            r["original"], r["rewrite"], r["edit"] = "", "", ""
+            continue
+        r["original"] = lines[n]
+        for col, out in (("rewrite_diff", "rewrite"), ("edit_diff", "edit")):
+            r[out] = apply(lines[n], json.loads(r[col])) if r.get(col) else ""
+
+
 def write_edits(rows: list[dict]) -> None:
+    """Store rows with rewrite and edit as diffs against the original line (no lyrics)."""
+    out = []
+    for r in rows:
+        row = dict(r)
+        if r.get("original"):
+            for text, col in (("rewrite", "rewrite_diff"), ("edit", "edit_diff")):
+                value = (r.get(text) or "").strip()
+                if col == "rewrite_diff" and value == r["original"]:
+                    value = ""  # an unchanged rewrite is no rewrite
+                # an edit equal to the original is kept: it means "keep the original line"
+                row[col] = json.dumps(diff(r["original"], value), ensure_ascii=False) \
+                    if value else ""
+        out.append(row)
     EDITS_CSV.parent.mkdir(parents=True, exist_ok=True)
     tmp = EDITS_CSV.with_suffix(".csv.tmp")
     with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=EDIT_COLUMNS, quoting=csv.QUOTE_ALL)
         w.writeheader()
-        w.writerows({k: r.get(k, "") for k in EDIT_COLUMNS} for r in rows)
+        w.writerows({k: r.get(k, "") for k in EDIT_COLUMNS} for r in out)
     tmp.replace(EDITS_CSV)
 
 
@@ -152,6 +192,62 @@ def write_side_by_side(path: Path, pairs: list[dict]) -> None:
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+PATCH_KEYS = ["id", "source", "artist", "title", "section_header", "split", "model",
+              "prompt_version", "style", "human_edited", "human_verdicts"]
+
+
+def to_patch(pair: dict) -> dict:
+    """The pair without lyrics: metadata and a word-level diff of each changed line."""
+    return {**{k: pair.get(k) for k in PATCH_KEYS},
+            "diff": {str(i): diff(pair["original"][i], pair["rewrite"][i])
+                     for i in pair["changed"]}}
+
+
+PAIR_KEYS = ["id", "source", "artist", "title", "section_header", "split", "original",
+             "rewrite", "changed", "model", "prompt_version", "style", "human_edited",
+             "human_verdicts"]
+
+
+def from_patch(patch: dict, rec: dict) -> dict:
+    """The full pair, field for field as exported (same key order)."""
+    rewrite = list(rec["lines"])
+    for i, ops in patch["diff"].items():
+        rewrite[int(i)] = apply(rec["lines"][int(i)], ops)
+    full = {**patch, "original": rec["lines"], "rewrite": rewrite,
+            "changed": sorted(int(i) for i in patch["diff"])}
+    return {k: full.get(k) for k in PAIR_KEYS}
+
+
+def write_jsonl(path: Path, records) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def write_pairs(name: str, pairs: list[dict]) -> Path:
+    """Full pairs and side-by-side (gitignored) plus the committed patch file."""
+    out = PAIRS_DIR / f"{name}.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(out, pairs)
+    write_side_by_side(PAIRS_DIR / f"{name}.md", pairs)
+    write_jsonl(PAIRS_DIR / f"{name}.patch.jsonl", (to_patch(p) for p in pairs))
+    return out
+
+
+def rebuild() -> None:
+    sections = load_sections()
+    for patch_file in sorted(PAIRS_DIR.glob("*.patch.jsonl")):
+        name = patch_file.name.removesuffix(".patch.jsonl")
+        patches = [json.loads(l) for l in open(patch_file, encoding="utf-8") if l.strip()]
+        missing = [p["id"] for p in patches if p["id"] not in sections]
+        pairs = [from_patch(p, sections[p["id"]][1]) for p in patches if p["id"] in sections]
+        write_jsonl(PAIRS_DIR / f"{name}.jsonl", pairs)
+        write_side_by_side(PAIRS_DIR / f"{name}.md", pairs)
+        note = (f", {len(missing)} sections not found (run the download, kidzbop and genius "
+                f"steps)") if missing else ""
+        print(f"{name}: {len(pairs)} pairs rebuilt{note}")
+
+
 def to_pair(gen: dict, source: str, rec: dict) -> dict:
     original, rewrite = rec["lines"], gen["lines"]
     return {
@@ -171,14 +267,20 @@ def main() -> None:
     parser.add_argument("--name", default=None, help="output name (default: first input)")
     parser.add_argument("--choices", action="store_true",
                         help="export the versions chosen in annotations/noise_choices.csv")
+    parser.add_argument("--rebuild", action="store_true",
+                        help="full pairs from pairs/*.patch.jsonl and the section records")
     args = parser.parse_args()
+    if args.rebuild:
+        rebuild()
+        return
     if not args.generations and not args.choices:
-        parser.error("give generation names or --choices")
+        parser.error("give generation names, --choices or --rebuild")
     if args.choices and not args.name:
         args.name = "noise_chosen"
 
     sections, reserved, detector = load_sections(), reserved_ids(), ExplicitDetector()
     edits = read_edits()
+    fill_text(edits, lambda sid: sections[sid][1]["lines"] if sid in sections else None)
     by_line = {(r["id"], int(r["line"])): r for r in edits if r.get("line", "").isdigit()}
     drop_ids = {r["id"] for r in edits if r.get("drop", "").strip().lower() in DROP_VALUES
                 or r.get("verdict", "").strip().lower() == "dislike"}
@@ -232,16 +334,11 @@ def main() -> None:
     write_edits(edits + new_rows)
 
     name = args.name or Path(args.generations[0]).name.removesuffix(".jsonl")
-    out = PAIRS_DIR / f"{name}.jsonl"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        for p in pairs:
-            f.write(json.dumps(p, ensure_ascii=False) + "\n")
-    write_side_by_side(out.with_suffix(".md"), pairs)
+    out = write_pairs(name, pairs)
     print(f"pairs: {len(pairs)} {dict(Counter(p['split'] for p in pairs))}, "
           f"with human edits: {sum(bool(p['human_edited']) for p in pairs)}")
     print(f"dropped: {dict(dropped)}")
-    print(f"output: {out} (side by side: {out.with_suffix('.md').name})")
+    print(f"output: {out} (side by side: {name}.md, committed patch: {name}.patch.jsonl)")
     print(f"edit sheet: {EDITS_CSV} ({len(new_rows)} new rows)")
 
 

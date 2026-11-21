@@ -333,10 +333,21 @@ so dialect stays as written). Hard lines (explicit end word, several explicit wo
 that fails a check) are rewritten by Qwen3-14B, which sees only the drafts, scored on meaning
 against the draft and on syllables and end rhyme against the original.
 
-`pairs.py` writes `pairs/<name>.jsonl`, committed (`original`, `rewrite`, `changed`,
-`split`, model and prompt version; no training features) and `<name>.md`, a side-by-side view.
+`pairs.py` writes, in `pairs/`:
+
+| File | Committed | Contents |
+| --- | --- | --- |
+| `<name>.patch.jsonl` | yes | ids, split, how the rewrite was made, human verdicts, and a word-level diff of each changed line (`linediff.py`); no lyrics |
+| `<name>.jsonl` | no (lyrics) | full pairs: `original`, `rewrite`, `changed`, `split`, model and prompt version; no training features |
+| `<name>.md` | no (lyrics) | side-by-side view |
+
 Kept: valid, passed the filters, at least one line changed, no detected explicit word left.
-Reserved commercial-evaluation sections are never exported.
+Reserved commercial-evaluation sections are never exported. To get the full pairs from the
+committed patches (after `download`, `kidzbop` and `genius`, which rebuild the sections):
+
+```bash
+python -m radio_ready.pairs --rebuild
+```
 
 ### Human vetting
 
@@ -352,14 +363,14 @@ original end word or its rhyme partners (`rhymes.py`: CMU rhymes of words common
 lyrics, ranked by masked-LM fit in the line and meaning; sound-alikes of the explicit word and
 function words are left out; `python -m radio_ready.rhymes --build` once). Distinctive rewrites
 come first, generic ones ("stuff", "things") last. Verdicts and edits go to
-`annotations/pair_edits.csv` (committed; also editable in Excel), which `pairs.py` applies: a
-dislike leaves the section out, a section the filters dropped comes back when all its lines
-are liked or edited.
+`annotations/pair_edits.csv` (committed; rewrites and edits are stored as diffs against the
+original line, so it holds no lyrics), which `pairs.py` applies: a dislike leaves the section
+out, a section the filters dropped comes back when all its lines are liked or edited.
 
 Noise versions (`python -m radio_ready.vet --choose "*noise*"`): one screen per section with
 every noise version (all styles and models), changed lines only; 1-9 picks the best, 0 none.
 Picks go to `annotations/noise_choices.csv`; `python -m radio_ready.pairs --choices` exports
-them as `pairs/noise_chosen.jsonl` (a pick counts as human approval).
+them as `pairs/noise_chosen.*` (a pick counts as human approval).
 
 ### Commercial LLMs (copy-paste)
 

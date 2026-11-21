@@ -1,6 +1,7 @@
 """Quick human vetting of synthetic rewrites, one line at a time (tkinter, no extra installs).
 
-Reads and writes annotations/pair_edits.csv (radio_ready.pairs). Each screen shows one row:
+Reads and writes annotations/pair_edits.csv (radio_ready.pairs; lines are stored as diffs and
+filled in from the section records). Each screen shows one row:
 the original line with its explicit words highlighted, and the proposed rewrite in an edit
 field. Change the text if you want (it is saved as your edit), then give a verdict:
 
@@ -43,7 +44,8 @@ from tkinter import font as tkfont
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.pairs import (
-    CHOICES_CSV, EDITS_CSV, SECTION_FILES, read_choices, read_edits, write_choices, write_edits,
+    CHOICES_CSV, EDITS_CSV, SECTION_FILES, fill_text, read_choices, read_edits, write_choices,
+    write_edits,
 )
 from radio_ready.text import rhyme_words, syllables, word_syllables
 
@@ -444,11 +446,12 @@ def main() -> None:
     rows = read_edits()
     if not rows:
         raise SystemExit(f"no rows in {EDITS_CSV}; run radio_ready.pairs first")
+    sections = load_sections({r["id"] for r in rows})
+    fill_text(rows, lambda sid: sections.get(sid, {}).get("lines"))
     counts, total = word_rarity()
     scored = [(uniqueness(r["original"], r.get("edit") or r.get("rewrite", ""), counts, total), k)
               for k, r in enumerate(rows) if args.all or not r.get("verdict")]
     order = [k for _, k in sorted(scored, reverse=True)]
-    sections = load_sections({r["id"] for r in rows})
     root = tk.Tk()
     App(root, rows, order, sections, ExplicitDetector())
     root.mainloop()
