@@ -20,7 +20,14 @@ present). Kept and dropped sections are both shown; radio_ready.pairs uses the v
 a dislike leaves the section out, and a dropped section whose rows are all liked or edited
 comes back.
 
-Run:  python -m radio_ready.vet [--sheet FILE] [--all]
+Choose mode (--choose PATTERN): one screen per section with every version from the matching
+generation files (default: all noise styles, "*noise*"); only the changed lines of each
+version are shown. Press 1-9 for the best version, 0 for none; Up / Down go back / skip.
+Choices go to annotations/noise_choices.csv (id, choice = generation name or "none"), which
+`python -m radio_ready.pairs --choices` turns into pairs.
+
+Run:  python -m radio_ready.vet [--all]
+      python -m radio_ready.vet --choose "*noise*"
 """
 
 import argparse
@@ -35,7 +42,9 @@ from tkinter import font as tkfont
 
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
-from radio_ready.pairs import EDITS_CSV, SECTION_FILES, read_edits, write_edits
+from radio_ready.pairs import (
+    CHOICES_CSV, EDITS_CSV, SECTION_FILES, read_choices, read_edits, write_choices, write_edits,
+)
 from radio_ready.text import rhyme_words, syllables, word_syllables
 
 WORD = re.compile(r"[a-z']+")
@@ -316,10 +325,121 @@ class App:
             self.update_info()
 
 
+class ChooseApp:
+    """Pick the best of several versions of a section (or none)."""
+
+    def __init__(self, root, items, choices, sections, detector):
+        self.root, self.items, self.choices = root, items, choices
+        self.sections, self.detector = sections, detector
+        self.pos, self.history = 0, []
+        base = tkfont.nametofont("TkDefaultFont").actual()["family"]
+        root.title("RadioReady: choose the best version")
+        root.geometry("1100x650")
+        self.header = tk.Label(root, anchor="w", font=(base, 11))
+        self.header.pack(fill="x", padx=12, pady=(10, 4))
+        self.text = tk.Text(root, wrap="word", font=(base, 13), relief="flat", bg="#fafafa")
+        self.text.pack(fill="both", expand=True, padx=12)
+        self.text.tag_configure("explicit", foreground="#c0392b", font=(base, 13, "bold"))
+        self.text.tag_configure("label", foreground="#2c6e49", font=(base, 13, "bold"))
+        self.text.tag_configure("muted", foreground="#999")
+        self.status = tk.Label(root, anchor="w", fg="#777",
+                               text="1-9 choose   0 none   Up back   Down skip")
+        self.status.pack(fill="x", padx=12, pady=8)
+        for n in range(10):
+            root.bind(str(n), lambda e, n=n: self.choose(n))
+        root.bind("<Up>", lambda e: self.back())
+        root.bind("<Down>", lambda e: self.skip())
+        self.show()
+
+    def show(self) -> None:
+        t = self.text
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        if self.pos >= len(self.items):
+            self.header.config(text="All sections chosen. Close the window.")
+            t.config(state="disabled")
+            return
+        sid, versions = self.items[self.pos]
+        rec = self.sections[sid]
+        done = sum(1 for s, _ in self.items if s in self.choices)
+        was = self.choices.get(sid)
+        self.header.config(text=f'{rec["artist"]} - {rec["title"]} ({rec.get("section_header")})'
+                                f'   {done}/{len(self.items)} chosen'
+                                + (f"   (was: {was})" if was else ""))
+        t.insert("end", "original\n", "label")
+        for i, line in enumerate(rec["lines"]):
+            start = t.index("end-1c")
+            t.insert("end", f"  {i + 1}. {line}\n")
+            for w in set(self.detector.find(line)):
+                for m in re.finditer(rf"(?<![\w']){re.escape(w)}(?![\w'])", line.lower()):
+                    off = len(f"  {i + 1}. ") + m.start()
+                    t.tag_add("explicit", f"{start}+{off}c", f"{start}+{off + len(w)}c")
+        for k, (name, lines) in enumerate(versions, start=1):
+            t.insert("end", f"\n{k}\n", "label")
+            changed = [(i, l) for i, (l, o) in enumerate(zip(lines, rec["lines"])) if l != o]
+            for i, l in changed:
+                t.insert("end", f"  {i + 1}. {l}\n")
+            if not changed:
+                t.insert("end", "  (no change)\n", "muted")
+        t.config(state="disabled")
+
+    def choose(self, n: int) -> None:
+        if self.pos >= len(self.items):
+            return
+        sid, versions = self.items[self.pos]
+        if n and n > len(versions):
+            return
+        self.choices[sid] = "none" if n == 0 else versions[n - 1][0]
+        try:
+            write_choices(self.choices)
+            self.status.config(text=f"saved: {self.choices[sid]}")
+        except PermissionError:
+            self.status.config(text="could not save: close the sheet in Excel (kept in memory)")
+        self.history.append(self.pos)
+        self.pos += 1
+        self.show()
+
+    def back(self) -> None:
+        if self.history:
+            self.pos = self.history.pop()
+            self.show()
+
+    def skip(self) -> None:
+        if self.pos < len(self.items):
+            self.history.append(self.pos)
+            self.pos += 1
+            self.show()
+
+
+def choose_items(pattern: str, show_all: bool, choices: dict) -> list[tuple[str, list]]:
+    """[(section id, [(generation name, lines), ...])] with distinct valid versions."""
+    by_id: dict[str, list] = {}
+    for path in sorted(paths.GENERATIONS_DIR.glob(f"{pattern}.jsonl")):
+        for line in open(path, encoding="utf-8"):
+            g = json.loads(line)
+            if g.get("valid") and g.get("lines"):
+                found = by_id.setdefault(g["id"], [])
+                if all(lines != g["lines"] for _, lines in found):
+                    found.append((path.stem, g["lines"]))
+    return [(sid, v[:9]) for sid, v in by_id.items() if show_all or sid not in choices]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vet synthetic rewrites line by line.")
     parser.add_argument("--all", action="store_true", help="also show rows already vetted")
+    parser.add_argument("--choose", default=None, metavar="PATTERN",
+                        help='choose the best version per section, e.g. "*noise*"')
     args = parser.parse_args()
+
+    if args.choose:
+        choices = read_choices()
+        items = choose_items(args.choose, args.all, choices)
+        if not items:
+            raise SystemExit(f"nothing to choose for {args.choose!r}")
+        root = tk.Tk()
+        ChooseApp(root, items, choices, load_sections({s for s, _ in items}), ExplicitDetector())
+        root.mainloop()
+        return
 
     rows = read_edits()
     if not rows:

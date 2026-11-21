@@ -2,7 +2,7 @@
 
 Inputs:  outputs/generations/<name>.jsonl (radio_ready.generate / radio_ready.rewrite), and
          the section records they were generated from (Genius sections, Kidz Bop sections)
-Output:  data/processed/pairs/<name>.jsonl, one pair per section:
+Output:  pairs/<name>.jsonl (committed), one pair per section, and pairs/<name>.md:
   id, source (genius / kidzbop), artist, title, section_header, split
   original           the explicit section lines
   rewrite            the radio edit lines (same number of lines)
@@ -31,8 +31,13 @@ Rows can also be added by hand for other lines of a section (id and line). Rules
 Pairs list edited line indexes in `human_edited` and line verdicts in `human_verdicts`.
 Close the file in Excel before running.
 
+Chosen versions: `--choices` exports the version picked per section in
+annotations/noise_choices.csv (radio_ready.vet --choose; a pick counts as human approval, so
+the filters do not drop it). Output name: noise_chosen.
+
 Run:  python -m radio_ready.pairs GENERATION [GENERATION ...] [--name NAME]
       python -m radio_ready.pairs solid_pilot_solid-v1
+      python -m radio_ready.pairs --choices
 """
 
 import argparse
@@ -46,7 +51,7 @@ from radio_ready.commercial import reserved_ids
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.labels import artist_split
 
-PAIRS_DIR = paths.PROCESSED / "pairs"
+PAIRS_DIR = paths.ROOT / "pairs"  # committed: the deliverable
 SECTION_FILES = {"genius": paths.GENIUS_SECTIONS_JSONL,
                  "kidzbop": paths.KIDZBOP_DIR / "sections.jsonl"}
 EDITS_CSV = paths.ANNOTATIONS / "pair_edits.csv"
@@ -73,6 +78,45 @@ def write_edits(rows: list[dict]) -> None:
     tmp.replace(EDITS_CSV)
 
 
+CHOICES_CSV = paths.ANNOTATIONS / "noise_choices.csv"
+
+
+def read_choices() -> dict[str, str]:
+    """{section id: chosen generation name or "none"} (radio_ready.vet --choose)."""
+    if not CHOICES_CSV.exists():
+        return {}
+    with open(CHOICES_CSV, encoding="utf-8-sig", newline="") as f:
+        return {r["id"]: r["choice"] for r in csv.DictReader(f) if r.get("choice")}
+
+
+def write_choices(choices: dict[str, str]) -> None:
+    CHOICES_CSV.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CHOICES_CSV.with_suffix(".csv.tmp")
+    with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f, quoting=csv.QUOTE_ALL)
+        w.writerow(["id", "choice"])
+        w.writerows(sorted(choices.items()))
+    tmp.replace(CHOICES_CSV)
+
+
+def generation_records(names: list[str], choices: bool):
+    """(generation record, chosen by a human) from the files, or from the human choices."""
+    if choices:
+        wanted: dict[str, set[str]] = {}
+        for sid, name in read_choices().items():
+            if name != "none":
+                wanted.setdefault(name, set()).add(sid)
+        for name, ids in sorted(wanted.items()):
+            for line in open(generation_path(name), encoding="utf-8"):
+                gen = json.loads(line)
+                if gen["id"] in ids:
+                    yield gen, True
+        return
+    for name in names:
+        for line in open(generation_path(name), encoding="utf-8"):
+            yield json.loads(line), False
+
+
 def load_sections() -> dict[str, tuple[str, dict]]:
     found = {}
     for source, path in SECTION_FILES.items():
@@ -86,8 +130,9 @@ def load_sections() -> dict[str, tuple[str, dict]]:
 
 def generation_path(name: str) -> Path:
     path = Path(name)
-    return path if path.suffix == ".jsonl" and path.exists() else \
-        paths.GENERATIONS_DIR / f"{Path(name).stem}.jsonl"
+    if name.endswith(".jsonl"):
+        return path if path.exists() else paths.GENERATIONS_DIR / path.name
+    return paths.GENERATIONS_DIR / f"{name}.jsonl"  # names contain dots ("qwen2.5-...")
 
 
 def write_side_by_side(path: Path, pairs: list[dict]) -> None:
@@ -122,9 +167,15 @@ def to_pair(gen: dict, source: str, rec: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export synthetic pairs from generation files.")
-    parser.add_argument("generations", nargs="+", help="names in outputs/generations or paths")
+    parser.add_argument("generations", nargs="*", help="names in outputs/generations or paths")
     parser.add_argument("--name", default=None, help="output name (default: first input)")
+    parser.add_argument("--choices", action="store_true",
+                        help="export the versions chosen in annotations/noise_choices.csv")
     args = parser.parse_args()
+    if not args.generations and not args.choices:
+        parser.error("give generation names or --choices")
+    if args.choices and not args.name:
+        args.name = "noise_chosen"
 
     sections, reserved, detector = load_sections(), reserved_ids(), ExplicitDetector()
     edits = read_edits()
@@ -132,57 +183,56 @@ def main() -> None:
     drop_ids = {r["id"] for r in edits if r.get("drop", "").strip().lower() in DROP_VALUES
                 or r.get("verdict", "").strip().lower() == "dislike"}
     pairs, dropped, seen, new_rows = [], Counter(), set(), []
-    for name in args.generations:
-        for line in open(generation_path(name), encoding="utf-8"):
-            gen = json.loads(line)
-            if gen["id"] in seen or gen["id"] in reserved or gen["id"] not in sections:
-                dropped["duplicate, reserved or no section record"] += 1
+    for gen, chosen in generation_records(args.generations, args.choices):
+        if gen["id"] in seen or gen["id"] in reserved or gen["id"] not in sections:
+            dropped["duplicate, reserved or no section record"] += 1
+            continue
+        source, rec = sections[gen["id"]]
+        lines = list(gen["lines"]) if gen.get("valid") and gen.get("lines") \
+            else list(rec["lines"])
+        reason = (None if gen.get("valid") and (chosen or gen.get("passed") is not False)
+                  else "no usable answer" if not gen.get("valid") else "failed filters")
+        # sheet rows for every rewritten line (and every target line without an answer)
+        rows = sorted({i for i, (a, b) in enumerate(zip(rec["lines"], lines)) if a != b}
+                      | set(gen.get("targets", [])))
+        for i in rows:
+            if (gen["id"], i + 1) not in by_line:
+                row = {"id": gen["id"], "line": str(i + 1), "artist": rec["artist"],
+                       "title": rec["title"], "original": rec["lines"][i],
+                       "rewrite": lines[i] if lines[i] != rec["lines"][i] else "",
+                       "status": "kept" if reason is None else f"dropped: {reason}"}
+                by_line[(gen["id"], i + 1)] = row
+                new_rows.append(row)
+        edited, verdicts, approved_all = [], {}, True
+        for (sid, n), row in by_line.items():
+            if sid != gen["id"] or not 0 < n <= len(lines):
                 continue
-            source, rec = sections[gen["id"]]
-            lines = list(gen["lines"]) if gen.get("valid") and gen.get("lines") \
-                else list(rec["lines"])
-            reason = (None if gen.get("valid") and gen.get("passed") is not False
-                      else "no usable answer" if not gen.get("valid") else "failed filters")
-            # sheet rows for every rewritten line (and every target line without an answer)
-            rows = sorted({i for i, (a, b) in enumerate(zip(rec["lines"], lines)) if a != b}
-                          | set(gen.get("targets", [])))
-            for i in rows:
-                if (gen["id"], i + 1) not in by_line:
-                    row = {"id": gen["id"], "line": str(i + 1), "artist": rec["artist"],
-                           "title": rec["title"], "original": rec["lines"][i],
-                           "rewrite": lines[i] if lines[i] != rec["lines"][i] else "",
-                           "status": "kept" if reason is None else f"dropped: {reason}"}
-                    by_line[(gen["id"], i + 1)] = row
-                    new_rows.append(row)
-            edited, verdicts, approved_all = [], {}, True
-            for (sid, n), row in by_line.items():
-                if sid != gen["id"] or not 0 < n <= len(lines):
-                    continue
-                verdict = row.get("verdict", "").strip().lower()
-                if verdict:
-                    verdicts[str(n - 1)] = verdict
-                if row.get("edit", "").strip():
-                    lines[n - 1] = row["edit"].strip()
-                    edited.append(n - 1)
-                elif verdict not in APPROVE:
-                    approved_all = False
-            if gen["id"] in drop_ids:
-                dropped["dropped by human (dislike or drop)"] += 1
-            elif reason and not approved_all:
-                dropped[reason] += 1
-            elif lines == rec["lines"]:
-                dropped["nothing changed"] += 1
-            elif detector.find("\n".join(lines)):
-                dropped["explicit word left" + (" after edits" if edited else "")] += 1
-            else:
-                pair = to_pair(gen | {"lines": lines}, source, rec)
-                pair["human_edited"] = sorted(edited)
-                pair["human_verdicts"] = verdicts
-                pairs.append(pair)
-                seen.add(gen["id"])
+            verdict = row.get("verdict", "").strip().lower()
+            if verdict:
+                verdicts[str(n - 1)] = verdict
+            if row.get("edit", "").strip():
+                lines[n - 1] = row["edit"].strip()
+                edited.append(n - 1)
+            elif verdict not in APPROVE:
+                approved_all = False
+        if gen["id"] in drop_ids:
+            dropped["dropped by human (dislike or drop)"] += 1
+        elif reason and not approved_all:
+            dropped[reason] += 1
+        elif lines == rec["lines"]:
+            dropped["nothing changed"] += 1
+        elif detector.find("\n".join(lines)):
+            dropped["explicit word left" + (" after edits" if edited else "")] += 1
+        else:
+            pair = to_pair(gen | {"lines": lines}, source, rec)
+            pair["human_edited"] = sorted(edited)
+            pair["human_verdicts"] = verdicts
+            pairs.append(pair)
+            seen.add(gen["id"])
     write_edits(edits + new_rows)
 
-    out = PAIRS_DIR / f"{args.name or Path(args.generations[0]).stem}.jsonl"
+    name = args.name or Path(args.generations[0]).name.removesuffix(".jsonl")
+    out = PAIRS_DIR / f"{name}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         for p in pairs:

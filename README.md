@@ -333,7 +333,7 @@ so dialect stays as written). Hard lines (explicit end word, several explicit wo
 that fails a check) are rewritten by Qwen3-14B, which sees only the drafts, scored on meaning
 against the draft and on syllables and end rhyme against the original.
 
-`pairs.py` writes `data/processed/pairs/<name>.jsonl` (`original`, `rewrite`, `changed`,
+`pairs.py` writes `pairs/<name>.jsonl`, committed (`original`, `rewrite`, `changed`,
 `split`, model and prompt version; no training features) and `<name>.md`, a side-by-side view.
 Kept: valid, passed the filters, at least one line changed, no detected explicit word left.
 Reserved commercial-evaluation sections are never exported.
@@ -355,6 +355,11 @@ come first, generic ones ("stuff", "things") last. Verdicts and edits go to
 `annotations/pair_edits.csv` (committed; also editable in Excel), which `pairs.py` applies: a
 dislike leaves the section out, a section the filters dropped comes back when all its lines
 are liked or edited.
+
+Noise versions (`python -m radio_ready.vet --choose "*noise*"`): one screen per section with
+every noise version (all styles and models), changed lines only; 1-9 picks the best, 0 none.
+Picks go to `annotations/noise_choices.csv`; `python -m radio_ready.pairs --choices` exports
+them as `pairs/noise_chosen.jsonl` (a pick counts as human approval).
 
 ### Commercial LLMs (copy-paste)
 
