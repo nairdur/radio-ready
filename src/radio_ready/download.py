@@ -12,7 +12,7 @@ import urllib.request
 
 from huggingface_hub import snapshot_download
 
-from radio_ready.paths import KIDZ_BOP_CSV, RAW
+from radio_ready.paths import CMUDICT_FILE, KIDZ_BOP_CSV, RAW
 
 HF_DATASETS = {
     "paradetox": "s-nlp/paradetox",
@@ -29,6 +29,11 @@ MGPHOT_FILES = ["mgphot_genes.tsv", "mgphot_gene_values.tsv"]
 TWITTERAAE_URL = "https://raw.githubusercontent.com/slanglab/twitteraae/master/model/{}"
 TWITTERAAE_FILES = ["model_vocab.txt", "model_count_table.txt"]
 
+# CMU Pronouncing Dictionary (BSD-2-Clause-style), pinned commit of cmusphinx/cmudict.
+CMUDICT_COMMIT = "74790861f652b15e4ac49015a90074ad62a27690"
+CMUDICT_URL = f"https://raw.githubusercontent.com/cmusphinx/cmudict/{CMUDICT_COMMIT}/{{}}"
+CMUDICT_FILES = ["cmudict.dict", "LICENSE"]
+
 KIDZ_BOP_URL = (
     "https://raw.githubusercontent.com/the-pudding/data/master/kidz-bop/KB_censored-lyrics.csv"
 )
@@ -44,7 +49,7 @@ MODELS = [
 
 SOURCES = [
     "paradetox", "kidz-bop", "genius", "spotify-tracks", "surge-profanity", "mgphot", "twitteraae",
-    "models",
+    "cmudict", "models",
 ]
 
 
@@ -82,6 +87,14 @@ def download_twitteraae() -> None:
     print(f"twitteraae: {target}")
 
 
+def download_cmudict() -> None:
+    target = CMUDICT_FILE.parent
+    target.mkdir(parents=True, exist_ok=True)
+    for name in CMUDICT_FILES:
+        urllib.request.urlretrieve(CMUDICT_URL.format(name), target / name)
+    print(f"cmudict: {target}")
+
+
 def download_models() -> None:
     for repo_id in MODELS:
         path = snapshot_download(
@@ -107,6 +120,8 @@ def main() -> None:
             download_mgphot()
         elif source == "twitteraae":
             download_twitteraae()
+        elif source == "cmudict":
+            download_cmudict()
         elif source == "models":
             download_models()
 

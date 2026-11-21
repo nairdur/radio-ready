@@ -6,7 +6,6 @@ accelerate
 bitsandbytes
 sentence-transformers
 bert-score
-pronouncing
 pandas
 pyarrow
 scikit-learn

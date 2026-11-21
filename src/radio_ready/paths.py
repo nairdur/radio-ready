@@ -13,6 +13,7 @@ OUTPUTS = ROOT / "outputs"
 KIDZ_BOP_CSV = RAW / "kidz-bop" / "KB_censored-lyrics.csv"
 GENIUS_DIR = RAW / "genius"
 SURGE_CSV = RAW / "surge-profanity" / "profanity_en.csv"
+CMUDICT_FILE = RAW / "cmudict" / "cmudict.dict"
 
 # Human-edited files: committed, never regenerated
 ANNOTATIONS = ROOT / "annotations"

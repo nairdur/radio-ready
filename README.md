@@ -36,6 +36,7 @@ src/radio_ready/
   commercial.py       copy-paste table for commercial LLMs
   compare.py          side-by-side scores of rewrite systems
   text.py             normalization, syllables, stress, rhyme
+  cmu.py              CMU Pronouncing Dictionary lookups (reads data/raw/cmudict)
   paths.py            file locations
   pipeline.py         runs all steps in order
   llm_judgment/       LLM-judged artifacts, not used by the pipeline
@@ -402,6 +403,7 @@ code keep their own licenses:
 | [MGPHot](https://zenodo.org/records/15372063) | CC BY-NC-ND 4.0 |
 | [Surge AI Obscenity List](https://huggingface.co/datasets/mmathys/profanity) | MIT |
 | [TwitterAAE model](https://github.com/slanglab/twitteraae) | MIT |
+| [CMU Pronouncing Dictionary](https://github.com/cmusphinx/cmudict) (`cmudict.dict`, pinned commit) | BSD-2-Clause-style, © 1993-2015 Carnegie Mellon University |
 
 ### Models
 
@@ -420,8 +422,6 @@ code keep their own licenses:
 | Component | License |
 | --- | --- |
 | `aae.py` inference, adapted from `slanglab/twitteraae` `predict.py` | MIT, © 2019 Su Lin Blodgett and Brendan O'Connor (notice in file) |
-| `pronouncing` | BSD-3-Clause |
-| `cmudict` (Python package, dependency of `pronouncing`) | GPL-3.0-or-later; dictionary data under the CMUdict BSD-style license |
 
 ## References
 
