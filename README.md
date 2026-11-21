@@ -334,8 +334,7 @@ python -m radio_ready.rewrite [--input FILE] [--limit N]    # pilot by default
 
 `pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the commercial
 models (`commercial_*`, from `python -m radio_ready.commercial --export`; they need your
-approval and may use the reserved commercial-evaluation sections) and `noise` (every
-noise-style generation; needs approval). In `pairs/`:
+approval and may use the reserved commercial-evaluation sections). In `pairs/`:
 
 | File | Committed | Contents |
 | --- | --- | --- |
@@ -371,7 +370,7 @@ generic ones ("stuff", "things") last.
 
 All verdicts go to one sheet, `annotations/vetting.csv` (committed, no lyrics: rewrites and
 edits are diffs against the original line). It has one row per line and proposed rewrite, so a
-rewrite several sources proposed (the 7B/14B run, a commercial model, noise versions) is vetted
+rewrite several sources proposed (the 7B/14B run, a commercial model) is vetted
 once and counts for all of them; `sources` lists who proposed it.
 
 ### Commercial LLMs (copy-paste)

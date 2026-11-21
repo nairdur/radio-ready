@@ -4,8 +4,9 @@ Sources (outputs/generations/):
   solid_*        radio_ready.rewrite runs (7B drafts, 14B for hard lines)
   commercial_*   commercial-LLM answers (radio_ready.commercial --export); need approval and
                  may use the Genius sections reserved for commercial evaluation
-  noise          every noise-style generation (*noise*: all styles and models), each version
-                 of a section judged line by line; needs approval
+  noise          the noise-style generations already made (*noise*; the styles themselves are
+                 not on main). Only versions whose every changed line keeps the meaning and
+                 fluency of its original (sensible()) reach the sheet; they need approval
 
 Vetting sheet: annotations/vetting.csv (committed; written by radio_ready.vet). One row per
 section line and proposed rewrite, so a rewrite that several sources produce for the same
@@ -18,6 +19,7 @@ the original line (radio_ready.linediff), filled in from the section records whe
   note          free text
   sources       the sources that proposed this rewrite, with their status (kept / dropped:
                 reason / needs approval)
+Rows that only a removed source (REMOVED_SOURCES) proposed are dropped from the sheet on export.
 Rules for one version of a section (all its lines, as one source proposed them):
   - a dislike on any of its lines leaves it out;
   - it needs every line liked, superliked or edited when the source needs approval or the
@@ -36,7 +38,7 @@ Kidz Bop by song. A full pair: id, source (genius / kidzbop), artist, title, sec
 split, original, rewrite, changed, model, prompt_version, style, human_edited, human_verdicts.
 No training features are added.
 
-Run:  python -m radio_ready.pairs SOURCE [SOURCE ...]     # e.g. solid_pilot_solid-v1 noise
+Run:  python -m radio_ready.pairs SOURCE [SOURCE ...]     # e.g. solid_pilot_solid-v1
       python -m radio_ready.pairs --all                    # every source
       python -m radio_ready.pairs --combine                # pairs/final.*
       python -m radio_ready.pairs --rebuild
@@ -63,7 +65,16 @@ OLD_SHEETS = [paths.ANNOTATIONS / "pair_edits.csv", *sorted((paths.ANNOTATIONS /
 SHEET_COLUMNS = ["id", "line", "artist", "title", "rewrite_diff", "edit_diff", "verdict",
                  "note", "sources"]
 APPROVE = {"like", "superlike"}
+REMOVED_SOURCES: set[str] = set()  # sources whose rows are dropped from the sheet on export
 NOISE = "noise"
+MAX_FLUENCY_DROP = 0.3  # noise sense filter: CoLA acceptability lost by a changed line
+NONSENSE = "nonsense"  # source status of rows only a sense-filtered version proposed
+
+
+def only_nonsense(row: dict) -> bool:
+    """Every source that proposed this row marks it nonsense (vet skips these rows)."""
+    parts = [s for s in row.get("sources", "").split("; ") if s]
+    return bool(parts) and all(s.split(": ", 1)[-1] == NONSENSE for s in parts)
 FINAL = "final"
 
 
@@ -99,8 +110,29 @@ def sources() -> dict[str, dict]:
             found[stem] = {"files": [g], "require_approval": True, "include_reserved": True}
     noise = [g for g in gens if "noise" in g.name]
     if noise:
-        found[NOISE] = {"files": noise, "require_approval": True, "include_reserved": False}
+        found[NOISE] = {"files": noise, "require_approval": True, "include_reserved": False,
+                        "sense_filter": True}
     return found
+
+
+_SCORERS: dict = {}
+
+
+def sensible(original: list[str], lines: list[str]) -> bool:
+    """Every changed line keeps the meaning (all-distilroberta-v1 cosine to its original >=
+    0.70, the ParaDeHate threshold) and reads as well as the original (CoLA acceptability drop
+    <= MAX_FLUENCY_DROP). Filters out nonsense lines before anyone has to vet them."""
+    from radio_ready.scoring import SIMILARITY_THRESHOLD, Fluency, Similarity
+
+    changed = [i for i, (a, b) in enumerate(zip(original, lines)) if a != b]
+    if not changed:
+        return False
+    if not _SCORERS:
+        _SCORERS.update(sim=Similarity(on="cpu"), flu=Fluency(on="cpu"))
+    a, b = [original[i] for i in changed], [lines[i] for i in changed]
+    sims = _SCORERS["sim"].pairwise(b, a)
+    drop = _SCORERS["flu"].score(a) - _SCORERS["flu"].score(b)
+    return bool((sims >= SIMILARITY_THRESHOLD).all() and (drop <= MAX_FLUENCY_DROP).all())
 
 
 # --- vetting sheet --------------------------------------------------------------------------
@@ -306,6 +338,18 @@ def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -
                 reason = "needs approval"
             status = "kept" if reason is None else (
                 reason if reason == "needs approval" else f"dropped: {reason}")
+            changed_rows = [by_key.get((gen["id"], i + 1, diff_cell(a, b)))
+                            for i, (a, b) in enumerate(zip(rec["lines"], lines)) if a != b]
+            human_ok = bool(changed_rows) and all(
+                r is not None and (r.get("verdict", "").strip().lower() in APPROVE
+                                   or (r.get("edit") or "").strip()) for r in changed_rows)
+            if spec.get("sense_filter") and not human_ok and not sensible(rec["lines"], lines):
+                dropped["nonsense (sense filter)"] += 1
+                for i, (a, b) in enumerate(zip(rec["lines"], lines)):
+                    row = by_key.get((gen["id"], i + 1, diff_cell(a, b))) if a != b else None
+                    if row is not None:  # already in the sheet: mark it, so vet skips it
+                        add_source(row, name, NONSENSE)
+                continue
             todo = sorted({i for i, (a, b) in enumerate(zip(rec["lines"], lines)) if a != b}
                           | set(gen.get("targets", [])))
             edited, verdicts, approved, disliked = [], {}, True, False
@@ -364,6 +408,11 @@ def export(names: list[str] | None = None) -> str:
             lines.append(f"{name}: unknown source (known: {', '.join(specs)})")
             continue
         lines.append(export_source(name, specs[name], sections, rows, detector))
+    for r in rows:  # forget removed sources; rows only they proposed are dropped
+        kept = [x for x in r.get("sources", "").split("; ")
+                if x and x.split(":", 1)[0] not in REMOVED_SOURCES]
+        r["sources"] = "; ".join(kept)
+    rows[:] = [r for r in rows if r["sources"]]
     write_sheet(rows)
     return "\n".join(lines)
 

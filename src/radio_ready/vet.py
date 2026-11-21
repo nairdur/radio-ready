@@ -1,7 +1,7 @@
 """Quick human vetting of synthetic rewrites, one line at a time (tkinter, no extra installs).
 
 Double-click vet.bat: a start window lists every source (radio_ready.pairs: the 7B/14B runs,
-the commercial models, all noise versions) with how many of its lines you have vetted, plus
+the commercial models) with how many of its lines you have vetted, plus
 "All sources". Enter or double-click opens one; Export pairs writes its pairs; Combine writes
 pairs/final (every source, identical pairs once). New runs show up after Export.
 
@@ -43,7 +43,8 @@ from tkinter import font as tkfont
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.pairs import (
-    SECTION_FILES, combine, export, load_sheet, source_names, sources, write_sheet,
+    SECTION_FILES, combine, export, load_sheet, only_nonsense, source_names, sources,
+    write_sheet,
 )
 from radio_ready.text import syllables
 
@@ -343,7 +344,8 @@ class App:
 def open_source(window, name: str, rows, sections, show_all: bool = False) -> bool:
     """A vetting window over the rows of one source (or all)."""
     keep = [k for k, r in enumerate(rows)
-            if (name == ALL or name in source_names(r)) and (show_all or not r.get("verdict"))]
+            if (name == ALL or name in source_names(r))
+            and (show_all or (not r.get("verdict") and not only_nonsense(r)))]
     if not keep:
         return False
     counts, total = word_rarity()
@@ -400,7 +402,8 @@ class Launcher:
         self.list.focus_set()
 
     def count(self, name: str) -> str:
-        rows = [r for r in self.rows if name == ALL or name in source_names(r)]
+        rows = [r for r in self.rows if (name == ALL or name in source_names(r))
+                and not only_nonsense(r)]
         if not rows:
             return "not exported yet: Export pairs to add its lines"
         return f"{sum(bool(r.get('verdict')) for r in rows)}/{len(rows)} lines vetted"
