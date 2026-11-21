@@ -322,57 +322,57 @@ skipped.
 
 ### Synthetic pairs
 
-```bash
-python -m radio_ready.rewrite                       # 7B drafts, 14B for hard lines (pilot by default)
-python -m radio_ready.pairs solid_pilot_solid-v1    # pairs + side-by-side .md + edit sheet
-```
-
 `rewrite.py`: every explicit line gets a Qwen2.5-7B draft that replaces only the explicit words
 (no rhyme or syllable hints; one-for-one word swaps away from the explicit words are put back,
 so dialect stays as written). Hard lines (explicit end word, several explicit words, or a draft
 that fails a check) are rewritten by Qwen3-14B, which sees only the drafts, scored on meaning
 against the draft and on syllables and end rhyme against the original.
 
-`pairs.py` writes, in `pairs/`:
+```bash
+python -m radio_ready.rewrite [--input FILE] [--limit N]    # pilot by default
+```
+
+`pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the commercial
+models (`commercial_*`, from `python -m radio_ready.commercial --export`; they need your
+approval and may use the reserved commercial-evaluation sections) and `noise` (every
+noise-style generation; needs approval). In `pairs/`:
 
 | File | Committed | Contents |
 | --- | --- | --- |
-| `<name>.patch.jsonl` | yes | ids, split, how the rewrite was made, human verdicts, and a word-level diff of each changed line (`linediff.py`); no lyrics |
-| `<name>.jsonl` | no (lyrics) | full pairs: `original`, `rewrite`, `changed`, `split`, model and prompt version; no training features |
-| `<name>.md` | no (lyrics) | side-by-side view |
+| `<source>.patch.jsonl` | yes | ids, split, how the rewrite was made, your verdicts, and a word-level diff of each changed line (`linediff.py`); no lyrics |
+| `<source>.jsonl` | no (lyrics) | full pairs: `original`, `rewrite`, `changed`, `split`, model and prompt version; no training features |
+| `<source>.md` | no (lyrics) | side-by-side view |
+| `final.*` | patch yes | every source combined; identical pairs (same section, same rewrite) kept once |
 
-Kept: valid, passed the filters, at least one line changed, no detected explicit word left.
-Reserved commercial-evaluation sections are never exported. To get the full pairs from the
-committed patches (after `download`, `kidzbop` and `genius`, which rebuild the sections):
+A version of a section becomes a pair when it passed the filters (or you approved all its
+lines), at least one line changed, nothing explicit is left, and none of its lines is disliked.
+With the section records built (`download`, `kidzbop`, `genius`), the full pairs come back from
+the committed patches:
 
 ```bash
 python -m radio_ready.pairs --rebuild
+python -m radio_ready.pairs --all --combine   # export every source, then pairs/final
 ```
 
 ### Human vetting
 
-```bash
-python -m radio_ready.vet        # or double-click vet.bat
-```
+Double-click `vet.bat`: a start window lists every source with how many of its lines are
+vetted, plus "All sources". Vet opens one; Export pairs writes its pairs (new runs appear
+there); Combine writes `pairs/final`.
 
 One line at a time: the original with its explicit words highlighted and the rewrite in an
 edit field. Edit in place if needed, then Enter (like), Ctrl+Enter (superlike) or Esc (dislike);
 Up/Down go back or skip; Tab shows the 4-line stanza, original and rewritten (it closes on
-every new line). Alt+1-8 puts a suggested end word in place: clean words that rhyme with the
-original end word or its rhyme partners (`rhymes.py`: CMU rhymes of words common in clean
-lyrics, ranked by masked-LM fit in the line and meaning; sound-alikes of the explicit word and
-function words are left out; `python -m radio_ready.rhymes --build` once). Distinctive rewrites
-come first, generic ones ("stuff", "things") last. Verdicts and edits go to
-`annotations/edits/<name>.csv`, one sheet per export (`python -m radio_ready.vet <name>`;
-without a name the most recently updated sheet opens; committed; rewrites and edits are stored
-as diffs against the
-original line, so it holds no lyrics), which `pairs.py` applies: a dislike leaves the section
-out, a section the filters dropped comes back when all its lines are liked or edited.
+every new line). Alt+1-8 puts a suggestion in place of the explicit word: clean words that
+rhyme with the explicit word itself, with its syllable count, never a sound-alike of it
+(`rhymes.py`: CMU rhymes of words common in clean lyrics, ranked by masked-LM fit in the slot
+and meaning; `python -m radio_ready.rhymes --build` once). Distinctive rewrites come first,
+generic ones ("stuff", "things") last.
 
-Noise versions (`python -m radio_ready.vet --choose "*noise*"`): one screen per section with
-every noise version (all styles and models), changed lines only; 1-9 picks the best, 0 none.
-Picks go to `annotations/noise_choices.csv`; `python -m radio_ready.pairs --choices` exports
-them as `pairs/noise_chosen.*` (a pick counts as human approval).
+All verdicts go to one sheet, `annotations/vetting.csv` (committed, no lyrics: rewrites and
+edits are diffs against the original line). It has one row per line and proposed rewrite, so a
+rewrite several sources proposed (the 7B/14B run, a commercial model, noise versions) is vetted
+once and counts for all of them; `sources` lists who proposed it.
 
 ### Commercial LLMs (copy-paste)
 

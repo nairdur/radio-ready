@@ -154,7 +154,8 @@ def candidates(targets: list[str], n_syllables: int, exclude: set[str]) -> list[
         for w in slant.get(sk, []) if sk else []:
             found.setdefault(w, "slant")
     return [(w, kind) for w, kind in found.items()
-            if w not in exclude and w not in common_words()
+            if w not in exclude and w not in common_words() and "'" not in w  # no possessives
+
             and abs(vocab[w]["syllables"] - n_syllables) <= 1]
 
 
@@ -198,6 +199,29 @@ def suggest(line: str, targets: list[str], n_syllables: int, embed, k: int = 8,
     sims = vecs[1:] @ vecs[0]
     fit = slot_fit().score(f"{before}\n{replace_end(line, '<mask>')}".strip(),
                            [w for w, _ in found])
+    z = lambda x: (x - x.mean()) / (x.std() + 1e-6) if len(x) > 1 else x * 0  # noqa: E731
+    score = z(fit) + z(sims) + np.array([0.3 if kind == "perfect" else 0 for _, kind in found])
+    order = np.argsort(-score)
+    return [{"word": found[i][0], "kind": found[i][1], "line": texts[i],
+             "fit": round(float(fit[i]), 2), "similarity": round(float(sims[i]), 3),
+             "score": round(float(score[i]), 2)} for i in order[:k]]
+
+
+def suggest_for_word(template: str, explicit: str, reference: str, embed, k: int = 4,
+                     before: str = "") -> list[dict]:
+    """Clean words for the slot `<mask>` in `template` that rhyme with the explicit word they
+    replace (bitch -> rich, switch), with its syllable count (within one), never a sound-alike
+    of it. Ranked by masked-LM fit in the slot and by how close the filled line stays in
+    meaning to `reference` (the current rewrite). Returns {word, kind, line, fit, ...}."""
+    exclude = set(WORD.findall(template.lower().replace("<mask>", " "))) | {explicit.lower()}
+    found = [(w, kind) for w, kind in candidates([explicit], word_syllables(explicit), exclude)
+             if not sounds_like(w, explicit)]
+    if not found:
+        return []
+    texts = [template.replace("<mask>", w) for w, _ in found]
+    vecs = embed([reference] + texts)
+    sims = vecs[1:] @ vecs[0]
+    fit = slot_fit().score(f"{before}\n{template}".strip(), [w for w, _ in found])
     z = lambda x: (x - x.mean()) / (x.std() + 1e-6) if len(x) > 1 else x * 0  # noqa: E731
     score = z(fit) + z(sims) + np.array([0.3 if kind == "perfect" else 0 for _, kind in found])
     order = np.argsort(-score)

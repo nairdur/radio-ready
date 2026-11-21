@@ -1,46 +1,37 @@
 """Quick human vetting of synthetic rewrites, one line at a time (tkinter, no extra installs).
 
-Reads and writes one sheet, annotations/edits/<name>.csv (radio_ready.pairs; lines are stored
-as diffs and filled in from the section records). Without a name it opens the most recently
-updated sheet. Each screen shows one row:
-the original line with its explicit words highlighted, and the proposed rewrite in an edit
-field. Change the text if you want (it is saved as your edit), then give a verdict:
+Double-click vet.bat: a start window lists every source (radio_ready.pairs: the 7B/14B runs,
+the commercial models, all noise versions) with how many of its lines you have vetted, plus
+"All sources". Enter or double-click opens one; Export pairs writes its pairs; Combine writes
+pairs/final (every source, identical pairs once). New runs show up after Export.
+
+The vetting window shows one line: the original with its explicit words highlighted and the
+proposed rewrite in an edit field. A rewrite that several sources proposed for the same line is
+one row (annotations/vetting.csv), so it is vetted once. Change the text if you want (saved as
+your edit), then:
 
   Enter          like
   Ctrl+Enter     superlike
   Esc            dislike
   Up / Down      back to the previous line / skip this line (no verdict)
   Tab            context: the 4-line stanza, original and rewritten (closes on every line)
-  Alt+1 ... 8    replace the end word with rhyme suggestion 1-8 (radio_ready.rhymes:
-                 clean words rhyming with the original end word or its rhyme partners,
-                 ranked by fit in the line and meaning; computed in the background)
+  Alt+1 ... 8    put a suggestion in place of the explicit word: clean words that rhyme with
+                 the explicit word itself, with its syllable count, never a sound-alike of it
+                 (radio_ready.rhymes; ranked by fit in the line and meaning; computed in the
+                 background); 1-4 for the first explicit word, 5-8 for the second
 
-Every verdict is saved to the sheet at once (close it in Excel first). Unvetted rows come
-first, the most distinctive rewrites before generic ones ("stuff", "things"): rows are ordered
-by how rare the new words are in clean lyrics (data/processed/match/corpus*.jsonl when
-present). Kept and dropped sections are both shown; radio_ready.pairs uses the verdicts:
-a dislike leaves the section out, and a dropped section whose rows are all liked or edited
-comes back.
+Every verdict is saved at once. Unvetted rows come first, the most distinctive rewrites before
+generic ones ("stuff", "things"): ordered by how rare the new words are in clean lyrics.
 
-Choose mode (--choose PATTERN): one screen per section with every version from the matching
-generation files (default: all noise styles, "*noise*"); only the changed lines of each
-version are shown. Press 1-9 for the best version, 0 for none; Up / Down go back / skip.
-Choices go to annotations/noise_choices.csv (id, choice = generation name or "none"), which
-`python -m radio_ready.pairs --choices` turns into pairs.
-
-Start window (vet.bat, or python -m radio_ready.vet with no arguments): every sheet with
-its progress, the noise versions to choose from, and finished runs without a sheet; Enter or
-double-click opens one, Export pairs writes its pairs (radio_ready.pairs with the right
-options). Closing a vetting window returns to the list.
-
-Run:  vet.bat                                       # start window
-      python -m radio_ready.vet [NAME] [--all]     # one sheet, e.g. commercial_claude
-      python -m radio_ready.vet --choose "*noise*"
+Run:  vet.bat                                   # start window
+      python -m radio_ready.vet [SOURCE] [--all]
 """
 
 import argparse
+import contextlib
+import difflib
+import io
 import json
-import sys
 import math
 import queue
 import re
@@ -52,13 +43,13 @@ from tkinter import font as tkfont
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.pairs import (
-    CHOICES_CSV, EDITS_DIR, SECTION_FILES, fill_text, read_choices, read_edits, sheet_path,
-    write_choices, write_edits,
+    SECTION_FILES, combine, export, load_sheet, source_names, sources, write_sheet,
 )
-from radio_ready.text import rhyme_words, syllables, word_syllables
+from radio_ready.text import syllables
 
 WORD = re.compile(r"[a-z']+")
 CORPUS_FILES = ["corpus_200k.jsonl", "corpus.jsonl"]
+ALL = "All sources"
 
 
 def word_rarity() -> tuple[Counter, int]:
@@ -83,35 +74,56 @@ def uniqueness(original: str, rewrite: str, counts: Counter, total: int) -> floa
     return sum(-math.log((counts[w] + 1) / total) for w in new) / len(new)
 
 
-def load_sections(ids: set[str]) -> dict[str, dict]:
+def load_sections(ids: set[str] | None = None) -> dict[str, tuple[str, dict]]:
+    """{id: (source, record)} for the given ids (all when None), read quickly."""
     found = {}
-    for path in SECTION_FILES.values():
+    for source, path in SECTION_FILES.items():
         if not path.exists():
             continue
         for line in open(path, encoding="utf-8"):
             m = re.search(r'"id": "([0-9a-f]+)"', line[:60])
-            if m and m.group(1) in ids:
-                found[m.group(1)] = json.loads(line)
+            if m and (ids is None or m.group(1) in ids):
+                found[m.group(1)] = (source, json.loads(line))
     return found
 
 
+def slots(original: str, current: str, detector) -> list[dict]:
+    """Where each explicit word of the original sits in the current line: the explicit word,
+    the token span of current that replaces it, and trailing punctuation to keep."""
+    a, b = original.split(" "), current.split(" ")
+    ops = difflib.SequenceMatcher(None, [w.lower() for w in a], [w.lower() for w in b],
+                                  autojunk=False).get_opcodes()
+    found = []
+    for i, token in enumerate(a):
+        words = detector.find(token)
+        if not words:
+            continue
+        for op, i1, i2, j1, j2 in ops:
+            if i1 <= i < i2 or (op == "insert" and i1 == i):
+                if op == "equal":
+                    j1, j2 = j1 + (i - i1), j1 + (i - i1) + 1
+                punct = re.search(r"[^\w']*$", b[j2 - 1] if j2 > j1 else token).group(0)
+                found.append({"word": words[0], "start": j1, "end": j2, "punct": punct})
+                break
+    return found[:2]
+
+
 class App:
-    def __init__(self, root, rows, order, sections, detector, sheet):
-        self.root, self.rows, self.order, self.sheet = root, rows, order, sheet
+    def __init__(self, root, rows, order, sections, detector, title):
+        self.root, self.rows, self.order = root, rows, order
         self.sections, self.detector = sections, detector
         self.pos, self.history, self.context = 0, [], False
-        self.suggestions, self.results, self.pending = [], queue.Queue(), None
+        self.suggestions, self.results, self.pending, self.slots = [], queue.Queue(), None, []
         base = tkfont.nametofont("TkDefaultFont").actual()["family"]
         big = (base, 15)
-        root.title(f"RadioReady vetting: {sheet.stem}")
-        root.geometry("1000x430")
+        root.title(f"RadioReady vetting: {title}")
+        root.geometry("1000x450")
         self.header = tk.Label(root, anchor="w", font=(base, 11))
         self.header.pack(fill="x", padx=12, pady=(10, 2))
         tk.Label(root, text="original", anchor="w", fg="#777").pack(fill="x", padx=12)
         self.orig = tk.Text(root, height=1, wrap="word", font=big, relief="flat", bg="#f4f4f4")
         self.orig.pack(fill="x", padx=12)
         self.orig.tag_configure("explicit", foreground="#c0392b", font=(base, 15, "bold"))
-        self.orig.tag_configure("current", background="#fff3b0")
         tk.Label(root, text="rewrite (edit in place)", anchor="w", fg="#777").pack(
             fill="x", padx=12, pady=(8, 0))
         self.edit = tk.Text(root, height=1, wrap="word", font=big, undo=True)
@@ -143,37 +155,35 @@ class App:
         self.edit.bind("<Control-Return>", lambda e: self.vote("superlike") or "break")
         root.bind("<Escape>", lambda e: self.vote("dislike"))
         self.edit.bind("<Tab>", lambda e: self.toggle() or "break")
-        root.bind("<Control-z>", lambda e: self.back() or "break")
         self.edit.bind("<Up>", lambda e: self.back() or "break")
         self.edit.bind("<Down>", lambda e: self.skip() or "break")
         for n in range(1, 9):
-            self.edit.bind(f"<Alt-Key-{n}>", lambda e, n=n: self.use_rhyme(n) or "break")
+            self.edit.bind(f"<Alt-Key-{n}>", lambda e, n=n: self.use_suggestion(n) or "break")
         self.show()
         self.poll()
+
+    # --- rows -----------------------------------------------------------------------------
 
     def row(self) -> dict:
         return self.rows[self.order[self.pos]]
 
+    def lines_of(self, sid: str) -> list[str]:
+        return self.sections[sid][1]["lines"] if sid in self.sections else []
+
     def proposed(self, row: dict) -> str:
         return row.get("edit", "").strip() or row.get("rewrite", "") or row["original"]
-
-    def current_lines(self, sid: str) -> list[str]:
-        lines = list(self.sections[sid]["lines"]) if sid in self.sections else []
-        for r in self.rows:
-            if r["id"] == sid and r.get("line", "").isdigit() and int(r["line"]) <= len(lines):
-                lines[int(r["line"]) - 1] = self.proposed(r)
-        return lines
 
     def show(self) -> None:
         if self.pos >= len(self.order):
             self.header.config(text="All rows vetted. Close the window.")
             for w in (self.orig, self.edit):
                 w.delete("1.0", "end")
+            self.rhymes.config(text="")
             return
         r = self.row()
-        done = sum(bool(x.get("verdict")) for x in self.rows)
+        done = sum(bool(self.rows[k].get("verdict")) for k in self.order)
         self.header.config(text=f'{r["artist"]} - {r["title"]}   line {r["line"]}   '
-                                f'[{r.get("status", "")}]   {done}/{len(self.rows)} vetted'
+                                f'[{r.get("sources", "")}]   {done}/{len(self.order)} vetted'
                                 + (f'   (was: {r["verdict"]})' if r.get("verdict") else ""))
         self.orig.config(state="normal")
         self.orig.delete("1.0", "end")
@@ -190,24 +200,25 @@ class App:
         self.context = False  # context closes on every line
         self.render_context()
         self.update_info()
-        self.load_rhymes()
+        self.load_suggestions()
 
     def render_context(self) -> None:
         if not self.context:
             self.ctx.pack_forget()
             return
         r = self.row()
-        sid, i = r["id"], int(r["line"]) - 1
-        orig = self.sections.get(sid, {}).get("lines", [])
-        new = self.current_lines(sid)
+        i = int(r["line"]) - 1
+        orig = self.lines_of(r["id"])
+        new = list(orig)
+        if 0 <= i < len(new):
+            new[i] = self.edit.get("1.0", "end").strip()
         start = (i // 4) * 4
         self.ctx.config(state="normal")
         self.ctx.delete("1.0", "end")
         for title, lines in [("original", orig), ("rewrite", new)]:
             self.ctx.insert("end", f"{title}\n")
             for j in range(start, min(len(lines), start + 4)):
-                tag = ("current",) if j == i else ()
-                self.ctx.insert("end", f"  {lines[j]}\n", tag)
+                self.ctx.insert("end", f"  {lines[j]}\n", ("current",) if j == i else ())
         self.ctx.config(state="disabled", height=11)
         self.ctx.pack(fill="x", padx=12, pady=(8, 0), before=self.info)
 
@@ -232,7 +243,7 @@ class App:
         r["edit"] = text if text and text != r.get("rewrite", "") else ""
         r["verdict"] = verdict
         try:
-            write_edits(self.rows, self.sheet)
+            write_sheet(self.rows)
             self.status.config(text=f"saved: line {r['line']} {verdict}")
         except PermissionError:
             self.status.config(text="could not save: close the sheet in Excel (kept in memory)")
@@ -251,42 +262,28 @@ class App:
             self.pos += 1
             self.show()
 
-    # --- rhyme suggestions ----------------------------------------------------------------
+    # --- suggestions for the explicit words -----------------------------------------------
 
-    def rhyme_request(self) -> tuple | None:
-        r = self.row()
-        rec = self.sections.get(r["id"])
-        if not rec:
-            return None
-        i = int(r["line"]) - 1
-        scheme = rec["rhyme_scheme"]
-        targets = []
-        for j, l in enumerate(rec["lines"]):
-            if j == i or scheme[j] == scheme[i]:
-                found = rhyme_words(l)
-                if found and found[-1] not in targets:
-                    targets.append(found[-1])
-        end = rhyme_words(r["original"])
-        n = word_syllables(end[-1]) if end else 1
-        before = rec["lines"][i - 1] if i > 0 else ""
-        return targets, n, before, sorted(set(self.detector.find(r["original"])))
-
-    def load_rhymes(self) -> None:
-        """Queue a suggestion request; one worker thread answers the latest request only."""
+    def load_suggestions(self) -> None:
+        """Queue a request; one worker thread answers the latest request only."""
         self.suggestions = []
-        request = self.rhyme_request()
-        line = self.edit.get("1.0", "end").strip()
-        if not request or not line:
+        r = self.row()
+        current = self.edit.get("1.0", "end").strip()
+        self.slots = slots(r["original"], current, self.detector)
+        if not self.slots:
             self.rhymes.config(text="")
             return
-        self.rhymes.config(text="rhymes: ...")
-        self.pending = (self.pos, line, request)
+        self.rhymes.config(text="rhymes for the explicit word: ...")
+        i = int(r["line"]) - 1
+        lines = self.lines_of(r["id"])
+        before = lines[i - 1] if 0 < i <= len(lines) else ""
+        self.pending = (self.pos, current, self.slots, before)
         if not getattr(self, "worker", None):
             self.worker = threading.Thread(target=self.work, daemon=True)
             self.worker.start()
 
     def work(self) -> None:
-        from radio_ready.rhymes import suggest
+        from radio_ready.rhymes import suggest_for_word
         from radio_ready.scoring import Similarity
 
         try:
@@ -300,207 +297,73 @@ class App:
             if job is None:
                 threading.Event().wait(0.05)
                 continue
-            pos, line, (targets, n, before, explicit) = job
+            pos, current, found_slots, before = job
+            tokens, out, err = current.split(" "), [], ""
             try:
-                found, err = suggest(line, targets, n, embed, k=8, before=before,
-                                     explicit=explicit), ""
+                for s in found_slots:
+                    template = " ".join(tokens[:s["start"]] + ["<mask>" + s["punct"]]
+                                        + tokens[s["end"]:])
+                    for c in suggest_for_word(template, s["word"], current, embed, k=4,
+                                              before=before):
+                        out.append({**c, "slot": s})
             except Exception as e:  # noqa: BLE001 (shown, never fatal)
-                found, err = [], str(e)
-            self.results.put((pos, found, err))  # tkinter is only touched by the main thread
+                err = str(e)
+            self.results.put((pos, out, err))  # tkinter is only touched by the main thread
 
     def poll(self) -> None:
         while not self.results.empty():
-            self.show_rhymes(*self.results.get())
+            pos, found, err = self.results.get()
+            if pos is None or pos == self.pos:
+                self.suggestions = found
+                if err:
+                    self.rhymes.config(text=f"rhymes unavailable: {err}")
+                elif not found:
+                    self.rhymes.config(text="rhymes for the explicit word: none found")
+                else:
+                    groups: dict[str, list[str]] = {}
+                    for n, s in enumerate(found, start=1):
+                        groups.setdefault(s["slot"]["word"], []).append(f"{n}={s['word']}")
+                    self.rhymes.config(text="Alt+n:   " + "      ".join(
+                        f"{w}: " + "  ".join(v) for w, v in groups.items()))
         self.root.after(100, self.poll)
 
-    def show_rhymes(self, pos, found: list[dict], err: str) -> None:
-        if pos is not None and pos != self.pos:
-            return  # moved on
-        self.suggestions = found
-        if err:
-            self.rhymes.config(text=f"rhymes unavailable: {err}")
-        elif not found:
-            self.rhymes.config(text="rhymes: none found")
-        else:
-            self.rhymes.config(text="rhymes (Alt+n):  " + "   ".join(
-                f"{k}={s['word']}" for k, s in enumerate(found, start=1)))
-
-    def use_rhyme(self, n: int) -> None:
-        if n <= len(self.suggestions):
-            from radio_ready.rhymes import replace_end
-
-            text = self.edit.get("1.0", "end").strip()
-            self.edit.delete("1.0", "end")
-            self.edit.insert("1.0", replace_end(text, self.suggestions[n - 1]["word"]))
-            self.update_info()
-
-
-class ChooseApp:
-    """Pick the best of several versions of a section (or none)."""
-
-    def __init__(self, root, items, choices, sections, detector):
-        self.root, self.items, self.choices = root, items, choices
-        self.sections, self.detector = sections, detector
-        self.pos, self.history = 0, []
-        base = tkfont.nametofont("TkDefaultFont").actual()["family"]
-        root.title("RadioReady: choose the best version")
-        root.geometry("1100x650")
-        self.header = tk.Label(root, anchor="w", font=(base, 11))
-        self.header.pack(fill="x", padx=12, pady=(10, 4))
-        self.text = tk.Text(root, wrap="word", font=(base, 13), relief="flat", bg="#fafafa")
-        self.text.pack(fill="both", expand=True, padx=12)
-        self.text.tag_configure("explicit", foreground="#c0392b", font=(base, 13, "bold"))
-        self.text.tag_configure("label", foreground="#2c6e49", font=(base, 13, "bold"))
-        self.text.tag_configure("muted", foreground="#999")
-        self.status = tk.Label(root, anchor="w", fg="#777",
-                               text="1-9 choose   0 none   Up back   Down skip")
-        self.status.pack(fill="x", padx=12, pady=8)
-        for n in range(10):
-            root.bind(str(n), lambda e, n=n: self.choose(n))
-        root.bind("<Up>", lambda e: self.back())
-        root.bind("<Down>", lambda e: self.skip())
-        self.show()
-
-    def show(self) -> None:
-        t = self.text
-        t.config(state="normal")
-        t.delete("1.0", "end")
-        if self.pos >= len(self.items):
-            self.header.config(text="All sections chosen. Close the window.")
-            t.config(state="disabled")
+    def use_suggestion(self, n: int) -> None:
+        if n > len(self.suggestions):
             return
-        sid, versions = self.items[self.pos]
-        rec = self.sections[sid]
-        done = sum(1 for s, _ in self.items if s in self.choices)
-        was = self.choices.get(sid)
-        self.header.config(text=f'{rec["artist"]} - {rec["title"]} ({rec.get("section_header")})'
-                                f'   {done}/{len(self.items)} chosen'
-                                + (f"   (was: {was})" if was else ""))
-        t.insert("end", "original\n", "label")
-        for i, line in enumerate(rec["lines"]):
-            start = t.index("end-1c")
-            t.insert("end", f"  {i + 1}. {line}\n")
-            for w in set(self.detector.find(line)):
-                for m in re.finditer(rf"(?<![\w']){re.escape(w)}(?![\w'])", line.lower()):
-                    off = len(f"  {i + 1}. ") + m.start()
-                    t.tag_add("explicit", f"{start}+{off}c", f"{start}+{off + len(w)}c")
-        for k, (name, lines) in enumerate(versions, start=1):
-            t.insert("end", f"\n{k}\n", "label")
-            changed = [(i, l) for i, (l, o) in enumerate(zip(lines, rec["lines"])) if l != o]
-            for i, l in changed:
-                t.insert("end", f"  {i + 1}. {l}\n")
-            if not changed:
-                t.insert("end", "  (no change)\n", "muted")
-        t.config(state="disabled")
-
-    def choose(self, n: int) -> None:
-        if self.pos >= len(self.items):
-            return
-        sid, versions = self.items[self.pos]
-        if n and n > len(versions):
-            return
-        self.choices[sid] = "none" if n == 0 else versions[n - 1][0]
-        try:
-            write_choices(self.choices)
-            self.status.config(text=f"saved: {self.choices[sid]}")
-        except PermissionError:
-            self.status.config(text="could not save: close the sheet in Excel (kept in memory)")
-        self.history.append(self.pos)
-        self.pos += 1
-        self.show()
-
-    def back(self) -> None:
-        if self.history:
-            self.pos = self.history.pop()
-            self.show()
-
-    def skip(self) -> None:
-        if self.pos < len(self.items):
-            self.history.append(self.pos)
-            self.pos += 1
-            self.show()
+        s = self.suggestions[n - 1]
+        tokens = self.edit.get("1.0", "end").strip().split(" ")
+        slot = s["slot"]
+        tokens[slot["start"]:slot["end"]] = [s["word"] + slot["punct"]]
+        self.edit.delete("1.0", "end")
+        self.edit.insert("1.0", " ".join(tokens))
+        self.update_info()
+        self.load_suggestions()  # the slots moved: recompute for the new text
 
 
-def choose_items(pattern: str, show_all: bool, choices: dict) -> list[tuple[str, list]]:
-    """[(section id, [(generation name, lines), ...])] with distinct valid versions."""
-    by_id: dict[str, list] = {}
-    for path in sorted(paths.GENERATIONS_DIR.glob(f"{pattern}.jsonl")):
-        for line in open(path, encoding="utf-8"):
-            g = json.loads(line)
-            if g.get("valid") and g.get("lines"):
-                found = by_id.setdefault(g["id"], [])
-                if all(lines != g["lines"] for _, lines in found):
-                    found.append((path.stem, g["lines"]))
-    return [(sid, v[:9]) for sid, v in by_id.items() if show_all or sid not in choices]
-
-
-NOISE_PATTERN = "*noise*"
-
-
-def sheet_rows(sheet) -> tuple[list[dict], dict]:
-    rows = read_edits(sheet)
-    sections = load_sections({r["id"] for r in rows})
-    fill_text(rows, lambda sid: sections.get(sid, {}).get("lines"))
-    return rows, sections
-
-
-def open_sheet(window, sheet, show_all: bool = False) -> bool:
-    rows, sections = sheet_rows(sheet)
-    if not rows:
+def open_source(window, name: str, rows, sections, show_all: bool = False) -> bool:
+    """A vetting window over the rows of one source (or all)."""
+    keep = [k for k, r in enumerate(rows)
+            if (name == ALL or name in source_names(r)) and (show_all or not r.get("verdict"))]
+    if not keep:
         return False
     counts, total = word_rarity()
-    scored = [(uniqueness(r["original"], r.get("edit") or r.get("rewrite", ""), counts, total), k)
-              for k, r in enumerate(rows) if show_all or not r.get("verdict")]
-    order = [k for _, k in sorted(scored, reverse=True)]
-    App(window, rows, order, sections, ExplicitDetector(), sheet)
+    scored = sorted(((uniqueness(rows[k]["original"], rows[k].get("edit") or
+                                 rows[k].get("rewrite", ""), counts, total), k) for k in keep),
+                    reverse=True)
+    App(window, rows, [k for _, k in scored], sections, ExplicitDetector(), name)
     return True
-
-
-def open_choose(window, pattern: str = NOISE_PATTERN, show_all: bool = False) -> bool:
-    choices = read_choices()
-    items = choose_items(pattern, show_all, choices)
-    if not items:
-        return False
-    ChooseApp(window, items, choices, load_sections({s for s, _ in items}), ExplicitDetector())
-    return True
-
-
-def export_args(name: str) -> list[str]:
-    """radio_ready.pairs arguments for a sheet: commercial answers need approval and may use
-    the reserved sections; noise_chosen comes from the noise choices."""
-    if name == "noise_chosen":
-        return ["--choices"]
-    if name.startswith("commercial_"):
-        return [name, "--include-reserved", "--require-approval"]
-    return [name]
-
-
-def export(name: str) -> str:
-    """Run the radio_ready.pairs export in-process and return what it printed."""
-    import contextlib
-    import io
-
-    from radio_ready import pairs
-
-    out, argv = io.StringIO(), sys.argv
-    sys.argv = ["pairs", *export_args(name)]
-    try:
-        with contextlib.redirect_stdout(out):
-            pairs.main()
-    finally:
-        sys.argv = argv
-    return out.getvalue()
 
 
 class Launcher:
-    """Start window: pick a sheet (or the noise versions, or a new run) and open or export."""
+    """Start window: pick a source and vet it, export its pairs, or combine everything."""
 
     def __init__(self, root):
         self.root = root
         root.title("RadioReady vetting")
-        root.geometry("720x420")
+        root.geometry("760x440")
         base = tkfont.nametofont("TkDefaultFont").actual()["family"]
-        tk.Label(root, text="Double-click or Enter to open; Export pairs writes the pairs.",
+        tk.Label(root, text="Double-click or Enter to vet. Export pairs writes the selected "
+                            "source's pairs; Combine writes pairs/final.",
                  anchor="w", fg="#555").pack(fill="x", padx=12, pady=(10, 4))
         self.list = tk.Listbox(root, font=(base, 12), activestyle="dotbox")
         self.list.pack(fill="both", expand=True, padx=12)
@@ -508,99 +371,88 @@ class Launcher:
         self.list.bind("<Return>", lambda e: self.open())
         bar = tk.Frame(root)
         bar.pack(fill="x", padx=12, pady=8)
-        tk.Button(bar, text="Open", width=14, command=self.open).pack(side="left")
-        tk.Button(bar, text="Open (all rows)", width=14,
+        tk.Button(bar, text="Vet", width=12, command=self.open).pack(side="left")
+        tk.Button(bar, text="Vet (all rows)", width=12,
                   command=lambda: self.open(show_all=True)).pack(side="left", padx=8)
-        tk.Button(bar, text="Export pairs", width=14, command=self.export).pack(side="left")
-        self.status = tk.Label(root, anchor="w", fg="#777", justify="left", wraplength=690)
+        tk.Button(bar, text="Export pairs", width=12, command=self.export).pack(side="left")
+        tk.Button(bar, text="Combine", width=12, command=self.combine).pack(side="left", padx=8)
+        self.status = tk.Label(root, anchor="w", fg="#777", justify="left", wraplength=730)
         self.status.pack(fill="x", padx=12, pady=(0, 10))
-        self.refresh()
+        self.reload()
 
-    def entries(self) -> list[tuple[str, str, str]]:
-        """(kind, name, label): sheets newest first, noise versions, runs without a sheet."""
-        found = []
-        sheets = sorted(EDITS_DIR.glob("*.csv"), key=lambda p: -p.stat().st_mtime)
-        for sheet in sheets:
-            rows = read_edits(sheet)
-            done = sum(bool(r.get("verdict")) for r in rows)
-            found.append(("sheet", sheet.stem, f"{sheet.stem}    {done}/{len(rows)} lines vetted"))
-        noise = choose_items(NOISE_PATTERN, True, {})
-        if noise:
-            chosen = read_choices()
-            done = sum(1 for sid, _ in noise if sid in chosen)
-            found.append(("choose", NOISE_PATTERN,
-                          f"Noise versions: pick the best    {done}/{len(noise)} sections"))
-        names = {s.stem for s in sheets}
-        for gen in sorted(paths.GENERATIONS_DIR.glob("*.jsonl"),
-                          key=lambda p: -p.stat().st_mtime):
-            stem = gen.name.removesuffix(".jsonl")
-            if stem not in names and (stem.startswith(("solid_", "commercial_"))):
-                found.append(("new", stem, f"{stem}    new run: Export pairs to create its sheet"))
-        return found
+    def reload(self) -> None:
+        self.status.config(text="loading ...")
+        self.root.update()
+        self.sections = load_sections()
+        self.rows = load_sheet(self.sections)
+        self.refresh()
+        self.status.config(text="")
 
     def refresh(self) -> None:
-        self.items = self.entries()
+        self.items = [(ALL, f"{ALL}    {self.count(ALL)}")]
+        for name in sources():
+            self.items.append((name, f"{name}    {self.count(name)}"))
         self.list.delete(0, "end")
-        for _, _, label in self.items:
+        for _, label in self.items:
             self.list.insert("end", label)
-        if self.items:
-            self.list.selection_set(0)
-            self.list.activate(0)
+        self.list.selection_set(0)
+        self.list.activate(0)
         self.list.focus_set()
 
-    def selected(self):
+    def count(self, name: str) -> str:
+        rows = [r for r in self.rows if name == ALL or name in source_names(r)]
+        if not rows:
+            return "not exported yet: Export pairs to add its lines"
+        return f"{sum(bool(r.get('verdict')) for r in rows)}/{len(rows)} lines vetted"
+
+    def selected(self) -> str | None:
         sel = self.list.curselection()
-        return self.items[sel[0]] if sel else None
+        return self.items[sel[0]][0] if sel else None
 
     def open(self, show_all: bool = False) -> None:
-        item = self.selected()
-        if not item:
-            return
-        kind, name, _ = item
-        if kind == "new":
-            self.status.config(text="Export pairs first: that creates the sheet for this run.")
+        name = self.selected()
+        if not name:
             return
         window = tk.Toplevel(self.root)
-        ok = (open_choose(window, name, show_all) if kind == "choose"
-              else open_sheet(window, sheet_path(name), show_all))
-        if not ok:
+        if not open_source(window, name, self.rows, self.sections, show_all):
             window.destroy()
-            self.status.config(text="Nothing left to vet here (use Open (all rows) to revisit).")
+            self.status.config(text="Nothing left to vet here (Vet (all rows) to revisit, or "
+                                    "Export pairs if it is new).")
             return
         window.protocol("WM_DELETE_WINDOW", lambda: (window.destroy(), self.refresh()))
 
-    def export(self) -> None:
-        item = self.selected()
-        if not item:
-            return
-        kind, name, _ = item
-        name = "noise_chosen" if kind == "choose" else name
-        self.status.config(text=f"exporting {name} ...")
+    def run(self, fn) -> None:
+        self.status.config(text="working ...")
         self.root.update()
+        out = io.StringIO()
         try:
-            text = export(name)
+            with contextlib.redirect_stdout(out):
+                text = fn()
         except Exception as e:  # noqa: BLE001 (shown in the window)
-            text = f"export failed: {e}"
-        self.status.config(text=text.strip())
-        self.refresh()
+            text = f"failed: {e}"
+        self.reload()
+        self.status.config(text=(text or out.getvalue()).strip())
+
+    def export(self) -> None:
+        name = self.selected()
+        if name:
+            self.run(lambda: export(None if name == ALL else [name]))
+
+    def combine(self) -> None:
+        self.run(combine)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vet synthetic rewrites line by line.")
-    parser.add_argument("sheet", nargs="?", default=None,
-                        help="sheet name in annotations/edits (default: the start window)")
+    parser.add_argument("source", nargs="?", default=None,
+                        help="a source name (default: the start window)")
     parser.add_argument("--all", action="store_true", help="also show rows already vetted")
-    parser.add_argument("--choose", default=None, metavar="PATTERN",
-                        help='choose the best version per section, e.g. "*noise*"')
     args = parser.parse_args()
-
     root = tk.Tk()
-    if args.choose:
-        if not open_choose(root, args.choose, args.all):
-            raise SystemExit(f"nothing to choose for {args.choose!r}")
-    elif args.sheet:
-        if not open_sheet(root, sheet_path(args.sheet), args.all):
-            raise SystemExit(f"no rows in {sheet_path(args.sheet)}")
+    if args.source:
+        sections = load_sections()
+        if not open_source(root, args.source, load_sheet(sections), sections, args.all):
+            raise SystemExit(f"nothing to vet for {args.source}")
     else:
         Launcher(root)
     root.mainloop()
