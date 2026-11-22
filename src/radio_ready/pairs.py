@@ -39,7 +39,14 @@ Outputs, in pairs/:
                         word-level diff of each changed line
   <source>.jsonl/.md    full pairs and a side-by-side view, gitignored (lyrics)
   final.*               --combine: every source, identical pairs (same section, same rewrite)
-                        kept once
+                        kept once; `from` lists every source that produced the pair and
+                        `edited` says whether a line you wrote is in it (both kept in the
+                        patch, so --rebuild restores them)
+  lines.*               --combine: line pairs, one per line you liked or superliked (your edit
+                        if you made one), even when its section version is out because of a
+                        disliked line; disliked lines never appear. Each has the line, its
+                        section as context, and your `verdict` (like / superlike) as a plain
+                        field; one per (section, line, final text)
 --rebuild recreates every .jsonl / .md from the patches and the section records (after the
 download, kidzbop and genius steps). Splits: Genius by artist (60/20/20 as radio_ready.labels),
 Kidz Bop by song. A full pair: id, source (genius / kidzbop), artist, title, section_header,
@@ -85,6 +92,7 @@ def only_nonsense(row: dict) -> bool:
     parts = [s for s in row.get("sources", "").split("; ") if s]
     return bool(parts) and all(s.split(": ", 1)[-1] == NONSENSE for s in parts)
 FINAL = "final"
+LINES = "lines"
 
 
 # --- sections and generation files ----------------------------------------------------------
@@ -305,11 +313,11 @@ def load_sheet(sections) -> list[dict]:
 
 # --- pairs ----------------------------------------------------------------------------------
 
-PATCH_KEYS = ["id", "source", "artist", "title", "section_header", "split", "model",
-              "prompt_version", "style", "human_edited", "human_verdicts"]
-PAIR_KEYS = ["id", "source", "artist", "title", "section_header", "split", "original",
-             "rewrite", "changed", "model", "prompt_version", "style", "human_edited",
-             "human_verdicts"]
+PATCH_KEYS = ["id", "source", "from", "edited", "artist", "title", "section_header", "split",
+              "model", "prompt_version", "style", "human_edited", "human_verdicts"]
+PAIR_KEYS = ["id", "source", "from", "edited", "artist", "title", "section_header", "split",
+             "original", "rewrite", "changed", "model", "prompt_version", "style",
+             "human_edited", "human_verdicts"]
 
 
 def to_pair(gen: dict, source: str, rec: dict, lines: list[str]) -> dict:
@@ -355,6 +363,8 @@ def write_side_by_side(path: Path, pairs: list[dict]) -> None:
     for p in pairs:
         out += [f"## {esc(p['artist'])} - {esc(p['title'])} "
                 f"({esc(p['section_header'] or '')}, {p['split']}, `{p['id']}`)", "",
+                f"from {', '.join(p.get('from') or [])}"
+                f"{'; has lines you wrote' if p.get('edited') else ''}", "",
                 "| # | original | rewrite |", "|---|---|---|"]
         for i, (o, r) in enumerate(zip(p["original"], p["rewrite"])):
             mark = " (edited)" if i in (p.get("human_edited") or []) else ""
@@ -507,6 +517,7 @@ def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -
                     seen.add(key)
                     pair = to_pair(gen, source, rec, version)
                     pair["human_edited"], pair["human_verdicts"] = edited, used
+                    pair["from"], pair["edited"] = [name], bool(edited)
                     pairs.append(pair)
     write_pairs(name, pairs)
     return (f"{name}: {len(pairs)} pairs {dict(Counter(p['split'] for p in pairs))}, "
@@ -533,13 +544,67 @@ def export(names: list[str] | None = None) -> str:
     return "\n".join(lines)
 
 
+LINE_PATCH_KEYS = ["id", "line", "source", "artist", "title", "section_header", "split",
+                   "verdict", "edited", "proposed_by"]
+
+
+def line_patches(rows: list[dict], sections, detector) -> list[dict]:
+    """Lyric-free line pairs: every liked or superliked row (text filled), deduplicated."""
+    out, seen = [], set()
+    for r in rows:
+        verdict = r.get("verdict", "").strip().lower()
+        if verdict not in APPROVE or r["id"] not in sections:
+            continue
+        final = (r.get("edit") or "").strip() or r.get("rewrite", "")
+        if not final or final == r["original"] or detector.find(final):
+            continue
+        key = (r["id"], int(r["line"]), final)
+        if key in seen:
+            continue
+        seen.add(key)
+        source, rec = sections[r["id"]]
+        out.append({"id": r["id"], "line": int(r["line"]), "source": source,
+                    "artist": rec["artist"], "title": rec["title"],
+                    "section_header": rec.get("section_header"),
+                    "split": rec.get("split") if source == "kidzbop"
+                    else artist_split(rec["artist"]),
+                    "verdict": verdict, "edited": bool((r.get("edit") or "").strip())
+                    or any(x.split(": ", 1)[-1] == YOURS
+                           for x in r.get("sources", "").split("; ") if x),
+                    "proposed_by": sorted(source_names(r)),
+                    "diff": diff(r["original"], final)})
+    return out
+
+
+def from_line_patch(patch: dict, rec: dict) -> dict:
+    """A full line pair: the original line, the rewrite and the section as context."""
+    original = rec["lines"][patch["line"] - 1]
+    return {**{k: patch.get(k) for k in LINE_PATCH_KEYS}, "original": original,
+            "rewrite": apply(original, patch["diff"]), "section": rec["lines"]}
+
+
+def write_lines(patches: list[dict], sections) -> list[dict]:
+    pairs = [from_line_patch(p, sections[p["id"]][1]) for p in patches if p["id"] in sections]
+    write_jsonl(PAIRS_DIR / f"{LINES}.patch.jsonl", patches)
+    write_jsonl(PAIRS_DIR / f"{LINES}.jsonl", pairs)
+    esc = lambda t: str(t).replace("|", r"\|")  # noqa: E731
+    md = [f"# {LINES}: line pairs you liked or superliked", "", f"{len(pairs)} line pairs.", "",
+          "| song | line | original | rewrite | verdict |", "|---|---|---|---|---|"]
+    md += [f"| {esc(p['artist'])} - {esc(p['title'])} | {p['line']} | {esc(p['original'])} | "
+           f"{esc(p['rewrite'])}{' (edited)' if p['edited'] else ''} | {p['verdict']} |"
+           for p in pairs]
+    (PAIRS_DIR / f"{LINES}.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    return pairs
+
+
 def combine() -> str:
-    """pairs/final.*: every source's pairs, identical pairs (same section, same rewrite) once."""
+    """pairs/final.*: every source's pairs, identical pairs (same section, same rewrite) once;
+    pairs/lines.*: every liked or superliked line as a pair of its own."""
     sections = load_sections()
-    seen, pairs, counts = set(), [], Counter()
+    seen, pairs, counts = {}, [], Counter()
     for patch_file in sorted(PAIRS_DIR.glob("*.patch.jsonl")):
         name = patch_file.name.removesuffix(".patch.jsonl")
-        if name == FINAL:
+        if name in (FINAL, LINES):
             continue
         for line in open(patch_file, encoding="utf-8"):
             patch = json.loads(line)
@@ -548,16 +613,23 @@ def combine() -> str:
                 continue
             pair = from_patch(patch, sections[patch["id"]][1])
             key = (pair["id"], tuple(pair["rewrite"]))
-            if key in seen:
+            if key in seen:  # the same pair from another list: note it there
                 counts["duplicate"] += 1
+                first = seen[key]
+                first["from"] = sorted(set(first["from"]) | {name})
+                first["edited"] = first["edited"] or bool(pair["human_edited"])
                 continue
-            seen.add(key)
-            pair["from"] = name
+            pair["from"], pair["edited"] = [name], bool(pair["human_edited"])
+            seen[key] = pair
             pairs.append(pair)
             counts[name] += 1
     write_pairs(FINAL, pairs)
-    return (f"final: {len(pairs)} pairs {dict(Counter(p['split'] for p in pairs))} "
-            f"from {dict(counts)}")
+    lines = write_lines(line_patches(load_sheet(sections), sections, ExplicitDetector()),
+                        sections)
+    return (f"final: {len(pairs)} pairs {dict(Counter(p['split'] for p in pairs))}, "
+            f"{sum(p['edited'] for p in pairs)} with a line you wrote; from {dict(counts)}\n"
+            f"lines: {len(lines)} line pairs {dict(Counter(p['split'] for p in lines))}, "
+            f"{dict(Counter(p['verdict'] for p in lines))}")
 
 
 def rebuild() -> str:
@@ -566,6 +638,9 @@ def rebuild() -> str:
         name = patch_file.name.removesuffix(".patch.jsonl")
         patches = [json.loads(l) for l in open(patch_file, encoding="utf-8") if l.strip()]
         missing = [p["id"] for p in patches if p["id"] not in sections]
+        if name == LINES:
+            out.append(f"{LINES}: {len(write_lines(patches, sections))} line pairs rebuilt")
+            continue
         pairs = [from_patch(p, sections[p["id"]][1]) for p in patches if p["id"] in sections]
         write_jsonl(PAIRS_DIR / f"{name}.jsonl", pairs)
         write_side_by_side(PAIRS_DIR / f"{name}.md", pairs)

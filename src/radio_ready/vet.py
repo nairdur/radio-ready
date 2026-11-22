@@ -24,11 +24,13 @@ is never replaced), and another list shows the proposal, not your version. Then:
                  line gets suggestions, numbered in order: 9 for one word, 4 each for two,
                  3 each for three, fewer as there are more
 
-Every verdict is saved at once. Unvetted rows come first, the most distinctive rewrites before
-generic ones ("stuff", "things"): ordered by how rare the new words are in clean lyrics.
+Every verdict is saved at once. All unvetted lines come first, the most distinctive rewrites
+before generic ones ("stuff", "things"; ordered by how rare the new words are in clean lyrics).
+Then a pause screen: close the window, or press Enter to go on to the lines already vetted
+(same order), to review or change them.
 
 Run:  vet.bat                                   # start window
-      python -m radio_ready.vet [SOURCE] [--all]
+      python -m radio_ready.vet [SOURCE]
 """
 
 import argparse
@@ -122,8 +124,11 @@ def slots(original: str, current: str, detector) -> list[dict]:
 
 
 class App:
-    def __init__(self, root, rows, order, sections, detector, title):
+    def __init__(self, root, rows, order, sections, detector, title, boundary=None):
         self.root, self.rows, self.order = root, rows, order
+        # order[:boundary] are unvetted; a pause screen comes before the vetted ones
+        self.boundary = len(order) if boundary is None else boundary
+        self.paused, self.past_pause = False, False
         self.sections, self.detector, self.source = sections, detector, title
         self.pos, self.history, self.context = 0, [], False
         self.suggestions, self.results, self.pending, self.slots = [], queue.Queue(), None, []
@@ -187,12 +192,28 @@ class App:
         """The line as the row proposes it (never an edit you made in another list)."""
         return row.get("rewrite", "") or row["original"]
 
+    def blank(self, message: str) -> None:
+        self.header.config(text=message)
+        self.orig.config(state="normal")
+        for w in (self.orig, self.edit):
+            w.delete("1.0", "end")
+        self.orig.config(state="disabled")
+        self.rhymes.config(text="")
+        self.info.config(text="")
+        self.context = False
+        self.ctx.pack_forget()
+
     def show(self) -> None:
+        self.paused = False
         if self.pos >= len(self.order):
-            self.header.config(text="All rows vetted. Close the window.")
-            for w in (self.orig, self.edit):
-                w.delete("1.0", "end")
-            self.rhymes.config(text="")
+            self.blank("All lines are done. Close the window.")
+            return
+        if self.pos == self.boundary and not self.past_pause:
+            self.paused = True
+            self.edit.focus_set()
+            self.blank(f"All {self.boundary} unvetted lines are done. Close the window, or press "
+                       f"Enter (or Down) to review the {len(self.order) - self.boundary} lines "
+                       f"you already vetted.")
             return
         r = self.row()
         done = sum(bool(self.rows[k].get("verdict")) for k in self.order)
@@ -250,6 +271,10 @@ class App:
         self.render_context()
 
     def vote(self, verdict: str) -> None:
+        if self.paused:
+            if verdict == "like":  # Enter on the pause screen: go on to the vetted lines
+                self.go_on()
+            return
         if self.pos >= len(self.order):
             return
         r = self.row()
@@ -272,12 +297,21 @@ class App:
         self.pos += 1
         self.show()
 
+    def go_on(self) -> None:
+        self.past_pause = True
+        self.show()
+
     def back(self) -> None:
         if self.history:
             self.pos = self.history.pop()
+            if self.pos < self.boundary:
+                self.past_pause = False
             self.show()
 
     def skip(self) -> None:
+        if self.paused:
+            self.go_on()
+            return
         if self.pos < len(self.order):
             self.history.append(self.pos)
             self.pos += 1
@@ -363,18 +397,23 @@ class App:
         self.load_suggestions()  # the slots moved: recompute for the new text
 
 
-def open_source(window, name: str, rows, sections, show_all: bool = False) -> bool:
-    """A vetting window over the rows of one source (or all)."""
-    keep = [k for k, r in enumerate(rows)
-            if (name == ALL or name in source_names(r))
-            and (show_all or (not r.get("verdict") and not only_nonsense(r)))]
-    if not keep:
+def open_source(window, name: str, rows, sections) -> bool:
+    """A vetting window over the rows of one source (or all): every unvetted line first, then,
+    after a pause screen, the lines already vetted."""
+    mine = [k for k, r in enumerate(rows) if name == ALL or name in source_names(r)]
+    unvetted = [k for k in mine if not rows[k].get("verdict") and not only_nonsense(rows[k])]
+    vetted = [k for k in mine if rows[k].get("verdict")]
+    if not unvetted and not vetted:
         return False
     counts, total = word_rarity()
-    scored = sorted(((uniqueness(rows[k]["original"], rows[k].get("edit") or
-                                 rows[k].get("rewrite", ""), counts, total), k) for k in keep),
-                    reverse=True)
-    App(window, rows, [k for _, k in scored], sections, ExplicitDetector(), name)
+
+    def ranked(ks):
+        return [k for _, k in sorted(((uniqueness(rows[k]["original"], rows[k].get("edit") or
+                                                  rows[k].get("rewrite", ""), counts, total), k)
+                                      for k in ks), reverse=True)]
+
+    App(window, rows, ranked(unvetted) + ranked(vetted), sections, ExplicitDetector(), name,
+        boundary=len(unvetted))
     return True
 
 
@@ -396,9 +435,8 @@ class Launcher:
         bar = tk.Frame(root)
         bar.pack(fill="x", padx=12, pady=8)
         tk.Button(bar, text="Vet", width=12, command=self.open).pack(side="left")
-        tk.Button(bar, text="Vet (all rows)", width=12,
-                  command=lambda: self.open(show_all=True)).pack(side="left", padx=8)
-        tk.Button(bar, text="Export pairs", width=12, command=self.export).pack(side="left")
+        tk.Button(bar, text="Export pairs", width=12,
+                  command=self.export).pack(side="left", padx=8)
         tk.Button(bar, text="Combine", width=12, command=self.combine).pack(side="left", padx=8)
         self.status = tk.Label(root, anchor="w", fg="#777", justify="left", wraplength=730)
         self.status.pack(fill="x", padx=12, pady=(0, 10))
@@ -434,15 +472,14 @@ class Launcher:
         sel = self.list.curselection()
         return self.items[sel[0]][0] if sel else None
 
-    def open(self, show_all: bool = False) -> None:
+    def open(self) -> None:
         name = self.selected()
         if not name:
             return
         window = tk.Toplevel(self.root)
-        if not open_source(window, name, self.rows, self.sections, show_all):
+        if not open_source(window, name, self.rows, self.sections):
             window.destroy()
-            self.status.config(text="Nothing left to vet here (Vet (all rows) to revisit, or "
-                                    "Export pairs if it is new).")
+            self.status.config(text="Nothing to vet here yet (Export pairs if it is new).")
             return
         window.protocol("WM_DELETE_WINDOW", lambda: (window.destroy(), self.refresh()))
 
@@ -471,12 +508,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Vet synthetic rewrites line by line.")
     parser.add_argument("source", nargs="?", default=None,
                         help="a source name (default: the start window)")
-    parser.add_argument("--all", action="store_true", help="also show rows already vetted")
     args = parser.parse_args()
     root = tk.Tk()
     if args.source:
         sections = load_sections()
-        if not open_source(root, args.source, load_sheet(sections), sections, args.all):
+        if not open_source(root, args.source, load_sheet(sections), sections):
             raise SystemExit(f"nothing to vet for {args.source}")
     else:
         Launcher(root)

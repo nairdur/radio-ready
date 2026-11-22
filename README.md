@@ -372,6 +372,7 @@ commercial-evaluation sections). In `pairs/`:
 | `<source>.jsonl` | no (lyrics) | full pairs: `original`, `rewrite`, `changed`, `split`, model and prompt version; no training features |
 | `<source>.md` | no (lyrics) | side-by-side view |
 | `final.*` | patch yes | every source combined; identical pairs (same section, same rewrite) kept once |
+| `lines.*` | patch yes | one pair per line you liked or superliked (your edit if you made one), with its section as context and your `verdict` as a plain field; disliked lines never appear, and a liked line counts even when its section version is out |
 
 Every version of a line you accepted is a pair of its own: the proposal when you liked or
 superliked it (or it passed the filters, needs no approval and you have not vetted it), and
@@ -391,8 +392,9 @@ python -m radio_ready.pairs --all --combine   # export every source, then pairs/
 ### Human vetting
 
 Double-click `vet.bat`: a start window lists every source with how many of its lines are
-vetted, plus "All sources". Vet opens one; Export pairs writes its pairs (new runs appear
-there); Combine writes `pairs/final`.
+vetted, plus "All sources". Vet opens one: all unvetted lines first, then a pause screen where
+you can close the window or press Enter to go on to the lines already vetted. Export pairs
+writes its pairs (new runs appear there); Combine writes `pairs/final`.
 
 One line at a time: the original with its explicit words highlighted and the rewrite in an
 edit field. Edit in place if needed, then Enter (like), Ctrl+Enter (superlike) or Esc (dislike);
