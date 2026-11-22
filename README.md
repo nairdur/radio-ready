@@ -356,8 +356,9 @@ python -m radio_ready.pairs --all --combine   # export every source, then pairs/
 ### Human vetting
 
 Double-click `vet.bat`: a start window lists every source with how many of its lines are
-vetted, plus "All sources". Vet opens one; Export pairs writes its pairs (new runs appear
-there); Combine writes `pairs/final`.
+vetted, plus "All sources". Vet opens one: all unvetted lines first, then a pause screen where
+you can close the window or press Enter to go on to the lines already vetted. Export pairs
+writes its pairs (new runs appear there); Combine writes `pairs/final`.
 
 One line at a time: the original with its explicit words highlighted and the rewrite in an
 edit field. Edit in place if needed, then Enter (like), Ctrl+Enter (superlike) or Esc (dislike);
