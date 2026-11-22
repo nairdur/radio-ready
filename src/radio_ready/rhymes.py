@@ -167,11 +167,13 @@ def common_words(n: int = 150) -> frozenset[str]:
 
 
 def sounds_like(word: str, explicit: str) -> bool:
-    """One phoneme or less apart (witch / ditch / pitch for bitch): would be heard as it."""
+    """One phoneme or less apart (witch / ditch / pitch for bitch): would be heard as it.
+    Unstressed vowels count as one sound (witches / bitches: AH0 = IH0)."""
     a, b = _phones(word), _phones(explicit)
     if not a or not b:
         return False
-    a, b = [re.sub(r"\d", "", p) for p in a], [re.sub(r"\d", "", p) for p in b]
+    plain = lambda ps: [re.sub(r"\d", "", "AH" if p.endswith("0") else p) for p in ps]  # noqa: E731
+    a, b = plain(a), plain(b)
     if abs(len(a) - len(b)) > 1:
         return False
     prev = list(range(len(b) + 1))

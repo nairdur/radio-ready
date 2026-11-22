@@ -4,6 +4,9 @@ Sources (outputs/generations/):
   solid_*        radio_ready.rewrite runs (7B drafts, 14B for hard lines)
   commercial_*   commercial-LLM answers (radio_ready.commercial --export); need approval and
                  may use the Genius sections reserved for commercial evaluation
+  rhyme_*        radio_ready.rhyme_swap runs: each explicit word swapped for a clean word that
+                 rhymes with it (the end-rhyme thesaurus), the rest of the line kept; need
+                 approval
   noise          the noise-style generations already made (*noise*; the styles themselves are
                  not on main). Only versions whose every changed line keeps the meaning and
                  fluency of its original (sensible()) reach the sheet; they need approval
@@ -108,6 +111,8 @@ def sources() -> dict[str, dict]:
             found[stem] = {"files": [g], "require_approval": False, "include_reserved": False}
         elif stem.startswith("commercial_"):
             found[stem] = {"files": [g], "require_approval": True, "include_reserved": True}
+        elif stem.startswith("rhyme_"):
+            found[stem] = {"files": [g], "require_approval": True, "include_reserved": False}
     noise = [g for g in gens if "noise" in g.name]
     if noise:
         found[NOISE] = {"files": noise, "require_approval": True, "include_reserved": False,

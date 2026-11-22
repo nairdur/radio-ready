@@ -32,6 +32,7 @@ src/radio_ready/
   scoring.py          similarity, toxicity and fluency models
   prompts.py          rewrite prompts and answer parsers
   generate.py         local-model rewrites with candidate selection
+  rhyme_swap.py       pairs from the end-rhyme thesaurus (explicit word -> clean rhyme)
   pairs.py            SFT pairs from generations
   commercial.py       copy-paste table for commercial LLMs
   compare.py          side-by-side scores of rewrite systems
@@ -332,9 +333,32 @@ against the draft and on syllables and end rhyme against the original.
 python -m radio_ready.rewrite [--input FILE] [--limit N]    # pilot by default
 ```
 
-`pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the commercial
-models (`commercial_*`, from `python -m radio_ready.commercial --export`; they need your
-approval and may use the reserved commercial-evaluation sections). In `pairs/`:
+`rhyme_swap.py`: no LLM rewrite. Every explicit word is swapped for a clean word from the
+end-rhyme thesaurus (`rhymes.py`, as in the vetting app's Alt+n suggestions): a word that rhymes
+with the explicit word itself, with its syllable count (within one), never a sound-alike of it
+or of its last sounds (no "dam" for "goddamn"). The rest of the line stays as written. The top 4
+words per explicit word (every combination when a line has two) are scored like `generate.py`
+(filters, CoLA fluency relative to the original) and the best is kept: similarity + 0.05 x
+masked-LM slot fit - fluency lost. The slot fit keeps the part of speech; similarity alone
+prefers words close in meaning to the explicit word but of the wrong kind ("money ain't
+exist"). `--cleanup` also lets Qwen2.5-7B (4-bit, about 5.5 GB of GPU memory) fix the grammar
+or a word or two around the new word, keeping it; those versions compete in the same ranking.
+
+```bash
+python -m radio_ready.rhyme_swap [--input FILE] [--limit N] [--k 4] [--cleanup]
+# -> outputs/generations/rhyme_<input>_rhyme-v1[-cleanup].jsonl, source rhyme_<input>_<version>
+```
+
+On the Kidz Bop pilot (50 sections, 67 lines with an explicit word, CPU only, about 1 s a
+section) 66 lines got a substitution. 55 of them pass the filters and lose at most 0.3 of CoLA
+acceptability. Reading them, about half make sense ("full of spirit", "go running crazy",
+"started this list", "six of my kids"). The rest have the wrong kind of word ("talking that
+minute", "We don't amok with lies"), so every line needs your approval.
+
+`pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the rhyme swaps
+(`rhyme_*`; they need your approval), the commercial models (`commercial_*`, from
+`python -m radio_ready.commercial --export`; they need your approval and may use the reserved
+commercial-evaluation sections). In `pairs/`:
 
 | File | Committed | Contents |
 | --- | --- | --- |
