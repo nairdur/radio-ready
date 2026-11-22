@@ -354,6 +354,13 @@ python -m radio_ready.rhyme_swap [--input FILE] [--limit N] [--k 6] [--drafts 4]
 # -> outputs/generations/rhyme_<input>_rhyme-v2.jsonl, source rhyme_<input>_rhyme-v2
 ```
 
+Kidz Bop pilot (50 sections, 67 lines with an explicit word, GPU, about 5 s a section): 29 lines
+reworded, 17 of them usable (filters, CoLA drop <= 0.3), e.g. "stacked up like my pants" and
+"Ooh slick, I'm a dangerous man with some dough in my pocket". Of the 268 7B answers 129 dropped
+the rhyme word (often for a better one: "lay your truth bare"), 60 broke the end rhyme by adding
+words after it, and 21 went on to the next lyric line. Lines with no kept answer are on the
+sheet with an empty rewrite, for your edit.
+
 `pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the rhyme swaps
 (`rhyme_*`; they need your approval), the commercial models (`commercial_*`, from
 `python -m radio_ready.commercial --export`; they need your approval and may use the reserved
