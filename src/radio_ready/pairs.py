@@ -7,9 +7,11 @@ Sources (outputs/generations/):
   rhyme_*        radio_ready.rhyme_swap runs: each explicit word swapped for a clean word that
                  rhymes with it (the end-rhyme thesaurus), the rest of the line kept; need
                  approval
-  noise          the noise-style generations already made (*noise*; the styles themselves are
-                 not on main). Only versions whose every changed line keeps the meaning and
-                 fluency of its original (sensible()) reach the sheet; they need approval
+  noise          the noise-style generations (*noise*; radio_ready.generate --style noise-*),
+                 except the full-noise runs (FULL_NOISE: whole lines or stanzas turned into
+                 made-up sounds, which the model copies back as gibberish). Only versions whose
+                 every changed line keeps the meaning and fluency of its original (sensible())
+                 reach the sheet; they need approval
 
 Vetting sheet: annotations/vetting.csv (committed; written by radio_ready.vet). One row per
 section line and proposed rewrite, so a rewrite that several sources produce for the same
@@ -82,6 +84,10 @@ SHEET_COLUMNS = ["id", "line", "artist", "title", "rewrite_diff", "edit_diff", "
 APPROVE = {"like", "superlike"}
 REMOVED_SOURCES: set[str] = set()  # sources whose rows are dropped from the sheet on export
 NOISE = "noise"
+# full-noise styles (whole lines / stanzas turned into made-up sounds): the model copies the
+# gibberish back, so their runs are not part of the noise source; your verdicts on their lines
+# stay on the sheet, and the lines you liked stay line pairs
+FULL_NOISE = ("-noise-line", "-noise-stanza")
 MAX_FLUENCY_DROP = 0.3  # noise sense filter: CoLA acceptability lost by a changed line
 NONSENSE = "nonsense"  # source status of rows only a sense-filtered version proposed
 YOURS = "your version"  # source status of a line you wrote in the vetting app
@@ -127,7 +133,7 @@ def sources() -> dict[str, dict]:
             found[stem] = {"files": [g], "require_approval": True, "include_reserved": True}
         elif stem.startswith("rhyme_"):
             found[stem] = {"files": [g], "require_approval": True, "include_reserved": False}
-    noise = [g for g in gens if "noise" in g.name]
+    noise = [g for g in gens if "noise" in g.name and not any(f in g.name for f in FULL_NOISE)]
     if noise:
         found[NOISE] = {"files": noise, "require_approval": True, "include_reserved": False,
                         "sense_filter": True}
