@@ -131,7 +131,7 @@ def sources() -> dict[str, dict]:
             found[stem] = {"files": [g], "require_approval": False, "include_reserved": False}
         elif stem.startswith("commercial_"):
             found[stem] = {"files": [g], "require_approval": True, "include_reserved": True}
-        elif stem.startswith(("rhyme_", "free_")):
+        elif stem.startswith(("rhyme_", "free_", "guided_")):
             found[stem] = {"files": [g], "require_approval": True, "include_reserved": False}
     noise = [g for g in gens if "noise" in g.name and not any(f in g.name for f in FULL_NOISE)]
     if noise:
