@@ -4,6 +4,9 @@ Sources (outputs/generations/):
   solid_*        radio_ready.rewrite runs (7B drafts, 14B for hard lines)
   commercial_*   commercial-LLM answers (radio_ready.commercial --export); need approval and
                  may use the Genius sections reserved for commercial evaluation
+  rhyme_*        radio_ready.rhyme_swap runs: each explicit word swapped for a clean word that
+                 rhymes with it (the end-rhyme thesaurus), the rest of the line kept; need
+                 approval
   noise          the noise-style generations already made (*noise*; the styles themselves are
                  not on main). Only versions whose every changed line keeps the meaning and
                  fluency of its original (sensible()) reach the sheet; they need approval
@@ -14,24 +17,31 @@ line is vetted once. No lyrics are stored: rewrites and edits are word-level dif
 the original line (radio_ready.linediff), filled in from the section records when loaded.
   id, line (1-based), artist, title
   rewrite_diff  the proposed rewrite ("" for an explicit line no source rewrote)
-  edit_diff     your line; replaces the rewrite
-  verdict       like / superlike / dislike
+  edit_diff     older sheets only: your line, stored on the proposal's row (it replaced the
+                rewrite); the app now writes every line you change as a row of its own
+  verdict       like / superlike / dislike; "edited" on a proposal you only rewrote
   note          free text
   sources       the sources that proposed this rewrite, with their status (kept / dropped:
-                reason / needs approval)
+                reason / needs approval / your version: a line you wrote while vetting a
+                proposal of that source)
 Rows that only a removed source (REMOVED_SOURCES) proposed are dropped from the sheet on export.
 Rules for one version of a section (all its lines, as one source proposed them):
-  - a dislike on any of its lines leaves it out;
-  - it needs every line liked, superliked or edited when the source needs approval or the
-    filters dropped it;
-  - edits replace the rewrite; nothing explicit may be left.
+  - every accepted version of a line counts: the proposal when liked or superliked (or when it
+    passed, the source needs no approval and you have not vetted it) and each of your own versions
+    of it that you liked or superliked. Each one is in a pair of its own: the first accepted
+    version of every line, plus one pair per further version of a line;
+  - a line with no accepted version leaves the section out when it was disliked, or when the
+    source needs approval or the filters dropped it;
+  - nothing explicit may be left.
 
 Outputs, in pairs/:
   <source>.patch.jsonl  committed, no lyrics: ids, split, how it was made, verdicts and a
                         word-level diff of each changed line
   <source>.jsonl/.md    full pairs and a side-by-side view, gitignored (lyrics)
   final.*               --combine: every source, identical pairs (same section, same rewrite)
-                        kept once
+                        kept once; `from` lists every source that produced the pair and
+                        `edited` says whether a line you wrote is in it (both kept in the
+                        patch, so --rebuild restores them)
   lines.*               --combine: line pairs, one per line you liked or superliked (your edit
                         if you made one), even when its section version is out because of a
                         disliked line; disliked lines never appear. Each has the line, its
@@ -74,6 +84,7 @@ REMOVED_SOURCES: set[str] = set()  # sources whose rows are dropped from the she
 NOISE = "noise"
 MAX_FLUENCY_DROP = 0.3  # noise sense filter: CoLA acceptability lost by a changed line
 NONSENSE = "nonsense"  # source status of rows only a sense-filtered version proposed
+YOURS = "your version"  # source status of a line you wrote in the vetting app
 
 
 def only_nonsense(row: dict) -> bool:
@@ -114,6 +125,8 @@ def sources() -> dict[str, dict]:
             found[stem] = {"files": [g], "require_approval": False, "include_reserved": False}
         elif stem.startswith("commercial_"):
             found[stem] = {"files": [g], "require_approval": True, "include_reserved": True}
+        elif stem.startswith("rhyme_"):
+            found[stem] = {"files": [g], "require_approval": True, "include_reserved": False}
     noise = [g for g in gens if "noise" in g.name]
     if noise:
         found[NOISE] = {"files": noise, "require_approval": True, "include_reserved": False,
@@ -235,6 +248,57 @@ def migrate(sections) -> list[dict]:
     return list(merged.values())
 
 
+def add_your_version(rows: list[dict], base: dict, text: str, verdict: str,
+                     names: set[str]) -> dict | None:
+    """Your own version `text` of the line of `base` (a row with text filled in), as a row of
+    its own with status YOURS for each source in `names` (the list you vetted it in). The same
+    text written in another list is the same row (one more source); different texts are
+    different rows, so every version you liked is a pair of its own. A row with this text and
+    a different verdict (given in another list) is never changed: returns None, and the caller
+    keeps your version as the edit of `base` instead, so both verdicts stand."""
+    cell = diff_cell(base["original"], text)
+    row = next((r for r in rows if r["id"] == base["id"] and r["line"] == base["line"]
+                and r.get("rewrite_diff", "") == cell), None)
+    if row is not None and verdict and row.get("verdict") and row["verdict"] != verdict:
+        return None
+    if row is None:
+        row = {"id": base["id"], "line": base["line"], "artist": base["artist"],
+               "title": base["title"], "rewrite_diff": cell, "original": base["original"],
+               "rewrite": text, "edit": "", "verdict": "", "note": "", "sources": ""}
+        rows.append(row)
+    if verdict:
+        row["verdict"] = verdict
+    for n in names:
+        if n not in source_names(row):
+            add_source(row, n, YOURS)
+    return row
+
+
+def split_edits(rows: list[dict]) -> int:
+    """Older sheets stored your line as the edit of the proposal's row, so a second edit (in
+    another list) replaced the first. Each such edit becomes a row of its own (add_your_version,
+    for the sources of the row, keeping its verdict; an edit counted as accepted, so a blank
+    verdict becomes like); the proposal keeps no edit and is marked "edited" (your verdict on
+    it as proposed is unknown). Returns how many edits were split off."""
+    n = 0
+    for r in list(rows):
+        edit = (r.get("edit") or "").strip()
+        if not edit:
+            continue
+        verdict = r.get("verdict", "").strip().lower()
+        if edit != r.get("rewrite", ""):
+            mine = add_your_version(rows, r, edit,
+                                    "" if verdict == "dislike" else verdict or "like",
+                                    source_names(r) or {"unknown"})
+            if mine is None:  # the same text has another verdict in another list: keep both
+                continue
+        r["edit"], r["edit_diff"] = "", ""
+        if verdict != "dislike":
+            r["verdict"] = "edited"
+        n += 1
+    return n
+
+
 def load_sheet(sections) -> list[dict]:
     """The vetting sheet with text filled in. Rows of older per-export sheets that still exist
     are merged in on every load (a verdict there fills a row without one here), so vetting
@@ -250,16 +314,17 @@ def load_sheet(sections) -> list[dict]:
             row.update(verdict=old["verdict"], edit_diff=old.get("edit_diff", ""),
                        note=old.get("note", "") or row.get("note", ""))
     fill_text(rows, lambda sid: sections[sid][1]["lines"] if sid in sections else None)
+    split_edits(rows)
     return rows
 
 
 # --- pairs ----------------------------------------------------------------------------------
 
-PATCH_KEYS = ["id", "source", "artist", "title", "section_header", "split", "model",
-              "prompt_version", "style", "human_edited", "human_verdicts"]
-PAIR_KEYS = ["id", "source", "artist", "title", "section_header", "split", "original",
-             "rewrite", "changed", "model", "prompt_version", "style", "human_edited",
-             "human_verdicts"]
+PATCH_KEYS = ["id", "source", "from", "edited", "artist", "title", "section_header", "split",
+              "model", "prompt_version", "style", "human_edited", "human_verdicts"]
+PAIR_KEYS = ["id", "source", "from", "edited", "artist", "title", "section_header", "split",
+             "original", "rewrite", "changed", "model", "prompt_version", "style",
+             "human_edited", "human_verdicts"]
 
 
 def to_pair(gen: dict, source: str, rec: dict, lines: list[str]) -> dict:
@@ -305,6 +370,8 @@ def write_side_by_side(path: Path, pairs: list[dict]) -> None:
     for p in pairs:
         out += [f"## {esc(p['artist'])} - {esc(p['title'])} "
                 f"({esc(p['section_header'] or '')}, {p['split']}, `{p['id']}`)", "",
+                f"from {', '.join(p.get('from') or [])}"
+                f"{'; has lines you wrote' if p.get('edited') else ''}", "",
                 "| # | original | rewrite |", "|---|---|---|"]
         for i, (o, r) in enumerate(zip(p["original"], p["rewrite"])):
             mark = " (edited)" if i in (p.get("human_edited") or []) else ""
@@ -324,9 +391,68 @@ def write_pairs(name: str, pairs: list[dict]) -> Path:
     return out
 
 
+def your_versions(rows: list[dict]) -> dict[tuple[str, int], list[dict]]:
+    """{(id, line): rows of your own versions (status YOURS)}."""
+    found: dict = {}
+    for r in rows:
+        if any(x.split(": ", 1)[-1] == YOURS for x in r.get("sources", "").split("; ") if x):
+            found.setdefault((r["id"], int(r["line"])), []).append(r)
+    return found
+
+
+def alternatives(row: dict, verdict: str, proposed: str, auto: bool, yours: list[dict],
+                 name: str) -> list[tuple[str, bool, str]]:
+    """Every accepted version of one line as (text, written by you, verdict), best first: the
+    proposal
+    when you liked or superliked it (or it passed, needs no approval and you have not vetted
+    it: a dislike or your own version of it means it is not accepted as is),
+    then each of your own versions of it you liked or superliked (rows with status YOURS for
+    this source), then an edit stored on the row itself (older sheets: it replaced the
+    proposal)."""
+    found = []
+    if proposed and (verdict in APPROVE or (auto and not verdict)):  # "edited": not as is
+        found.append((proposed, False, verdict))
+    for r in sorted(yours, key=lambda r: r.get("verdict") != "superlike"):
+        v = r.get("verdict", "").strip().lower()
+        if name in source_names(r) and v in APPROVE:
+            found.append((r["rewrite"], True, v))
+    old = (row.get("edit") or "").strip()
+    if old and verdict != "dislike":
+        found.append((old, True, verdict))
+    seen, out = set(), []
+    for alt in found:
+        if alt[0] not in seen:
+            seen.add(alt[0])
+            out.append(alt)
+    return out
+
+
+def versions(lines: list[str], alts: dict[int, list[tuple[str, bool, str]]],
+             verdicts: dict[str, str]):
+    """(section lines, lines you wrote, verdicts of the lines used) for every accepted version:
+    the first alternative of each line, then one more version for each further alternative of
+    a line (the other lines as in the first). Every liked line is thus in a pair of its own."""
+    base, mine, used = list(lines), set(), dict(verdicts)
+    for i, found in alts.items():
+        if found:
+            base[i] = found[0][0]
+            if found[0][1]:
+                mine.add(i)
+            if found[0][2]:
+                used[str(i)] = found[0][2]
+    yield base, sorted(mine), used
+    for i, found in alts.items():
+        for text, by_you, verdict in found[1:]:
+            v = list(base)
+            v[i] = text
+            yield (v, sorted((mine - {i}) | ({i} if by_you else set())),
+                   {**used, str(i): verdict} if verdict else used)
+
+
 def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -> str:
     """Pairs of one source; new rows are added to `rows` (the sheet). Returns a summary."""
     by_key = {row_key(r): r for r in rows}
+    yours = your_versions(rows)
     reserved = set() if spec["include_reserved"] else reserved_ids()
     pairs, dropped, seen, new = [], Counter(), set(), 0
     for path in spec["files"]:
@@ -348,7 +474,10 @@ def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -
                             for i, (a, b) in enumerate(zip(rec["lines"], lines)) if a != b]
             human_ok = bool(changed_rows) and all(
                 r is not None and (r.get("verdict", "").strip().lower() in APPROVE
-                                   or (r.get("edit") or "").strip()) for r in changed_rows)
+                                   or (r.get("edit") or "").strip()
+                                   or any(y.get("verdict") in APPROVE for y in
+                                          yours.get((r["id"], int(r["line"])), [])))
+                for r in changed_rows)
             if spec.get("sense_filter") and not human_ok and not sensible(rec["lines"], lines):
                 dropped["nonsense (sense filter)"] += 1
                 for i, (a, b) in enumerate(zip(rec["lines"], lines)):
@@ -358,7 +487,7 @@ def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -
                 continue
             todo = sorted({i for i, (a, b) in enumerate(zip(rec["lines"], lines)) if a != b}
                           | set(gen.get("targets", [])))
-            edited, verdicts, approved, disliked = [], {}, True, False
+            verdicts, alts, blocked = {}, {}, None
             for i in todo:
                 proposed = lines[i] if lines[i] != rec["lines"][i] else ""
                 key = (gen["id"], i + 1, diff_cell(rec["lines"][i], proposed) if proposed
@@ -376,28 +505,27 @@ def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -
                 verdict = row.get("verdict", "").strip().lower()
                 if verdict:
                     verdicts[str(i)] = verdict
-                disliked |= verdict == "dislike"
-                if (row.get("edit") or "").strip():
-                    lines[i] = row["edit"].strip()
-                    edited.append(i)
-                elif verdict not in APPROVE:
-                    approved = False
-            key = (gen["id"], tuple(lines))
-            if disliked:
-                dropped["disliked"] += 1
-            elif reason and not approved:
-                dropped[reason] += 1
-            elif lines == rec["lines"]:
-                dropped["nothing changed"] += 1
-            elif detector.find("\n".join(lines)):
-                dropped["explicit word left" + (" after edits" if edited else "")] += 1
-            elif key in seen:
-                dropped["duplicate version"] += 1
-            else:
-                seen.add(key)
-                pair = to_pair(gen, source, rec, lines)
-                pair["human_edited"], pair["human_verdicts"] = sorted(edited), verdicts
-                pairs.append(pair)
+                alts[i] = alternatives(row, verdict, proposed, reason is None,
+                                       yours.get((gen["id"], i + 1), []), name)
+                if not alts[i] and blocked is None and (verdict == "dislike" or reason):
+                    blocked = "disliked" if verdict == "dislike" else reason
+            if blocked:
+                dropped[blocked] += 1
+                continue
+            for version, edited, used in versions(lines, alts, verdicts):
+                key = (gen["id"], tuple(version))
+                if version == rec["lines"]:
+                    dropped["nothing changed"] += 1
+                elif detector.find("\n".join(version)):
+                    dropped["explicit word left" + (" after edits" if edited else "")] += 1
+                elif key in seen:
+                    dropped["duplicate version"] += 1
+                else:
+                    seen.add(key)
+                    pair = to_pair(gen, source, rec, version)
+                    pair["human_edited"], pair["human_verdicts"] = edited, used
+                    pair["from"], pair["edited"] = [name], bool(edited)
+                    pairs.append(pair)
     write_pairs(name, pairs)
     return (f"{name}: {len(pairs)} pairs {dict(Counter(p['split'] for p in pairs))}, "
             f"{sum(bool(p['human_edited']) for p in pairs)} with your edits; {new} new lines "
@@ -447,7 +575,9 @@ def line_patches(rows: list[dict], sections, detector) -> list[dict]:
                     "section_header": rec.get("section_header"),
                     "split": rec.get("split") if source == "kidzbop"
                     else artist_split(rec["artist"]),
-                    "verdict": verdict, "edited": bool((r.get("edit") or "").strip()),
+                    "verdict": verdict, "edited": bool((r.get("edit") or "").strip())
+                    or any(x.split(": ", 1)[-1] == YOURS
+                           for x in r.get("sources", "").split("; ") if x),
                     "proposed_by": sorted(source_names(r)),
                     "diff": diff(r["original"], final)})
     return out
@@ -478,7 +608,7 @@ def combine() -> str:
     """pairs/final.*: every source's pairs, identical pairs (same section, same rewrite) once;
     pairs/lines.*: every liked or superliked line as a pair of its own."""
     sections = load_sections()
-    seen, pairs, counts = set(), [], Counter()
+    seen, pairs, counts = {}, [], Counter()
     for patch_file in sorted(PAIRS_DIR.glob("*.patch.jsonl")):
         name = patch_file.name.removesuffix(".patch.jsonl")
         if name in (FINAL, LINES):
@@ -490,18 +620,21 @@ def combine() -> str:
                 continue
             pair = from_patch(patch, sections[patch["id"]][1])
             key = (pair["id"], tuple(pair["rewrite"]))
-            if key in seen:
+            if key in seen:  # the same pair from another list: note it there
                 counts["duplicate"] += 1
+                first = seen[key]
+                first["from"] = sorted(set(first["from"]) | {name})
+                first["edited"] = first["edited"] or bool(pair["human_edited"])
                 continue
-            seen.add(key)
-            pair["from"] = name
+            pair["from"], pair["edited"] = [name], bool(pair["human_edited"])
+            seen[key] = pair
             pairs.append(pair)
             counts[name] += 1
     write_pairs(FINAL, pairs)
     lines = write_lines(line_patches(load_sheet(sections), sections, ExplicitDetector()),
                         sections)
-    return (f"final: {len(pairs)} pairs {dict(Counter(p['split'] for p in pairs))} "
-            f"from {dict(counts)}\n"
+    return (f"final: {len(pairs)} pairs {dict(Counter(p['split'] for p in pairs))}, "
+            f"{sum(p['edited'] for p in pairs)} with a line you wrote; from {dict(counts)}\n"
             f"lines: {len(lines)} line pairs {dict(Counter(p['split'] for p in lines))}, "
             f"{dict(Counter(p['verdict'] for p in lines))}")
 

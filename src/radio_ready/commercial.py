@@ -146,8 +146,11 @@ def parse_answer(answer: str, record: dict) -> dict[int, str] | None:
         lines = [r.strip() for r in rows]  # one lyric line per row
     else:
         lines = [l.strip() for l in " ".join(rows).split(SEP.strip())]
-    if len(lines) == len(record["lines"]) + 1 and lines[0].strip('"').startswith(record["title"]):
+    if len(lines) in (len(record["lines"]) + 1, record.get("lines_before_repeats", -2) + 1)             and lines[0].strip('"').startswith(record["title"]):
         lines = lines[1:]  # title line echoed back
+    if len(lines) == record.get("lines_before_repeats", -1):  # pasted before the repeats went
+        drop = set(record["repeat_lines_dropped"])
+        lines = [l for i, l in enumerate(lines) if i not in drop]
     if len(lines) != len(record["lines"]) or not all(lines):
         return None
     return {i: t for i, (t, o) in enumerate(zip(lines, record["lines"])) if t != o.strip()}

@@ -7,18 +7,22 @@ pairs/final (every source, identical pairs once). New runs show up after Export.
 
 The vetting window shows one line: the original with its explicit words highlighted and the
 proposed rewrite in an edit field. A rewrite that several sources proposed for the same line is
-one row (annotations/vetting.csv), so it is vetted once. Change the text if you want (saved as
-your edit), then:
+one row (annotations/vetting.csv), so it is vetted once. Change the text if you want: your
+version is saved as a row of its own for the list you are vetting (radio_ready.pairs.
+add_your_version) and becomes a pair of its own; the proposal keeps its verdict (a like on it
+is never replaced), and another list shows the proposal, not your version. Then:
 
   Enter          like
   Ctrl+Enter     superlike
   Esc            dislike
   Up / Down      back to the previous line / skip this line (no verdict)
   Tab            context: the 4-line stanza, original and rewritten (closes on every line)
-  Alt+1 ... 8    put a suggestion in place of the explicit word: clean words that rhyme with
+  Alt+1 ... 9    put a suggestion in place of an explicit word: clean words that rhyme with
                  the explicit word itself, with its syllable count, never a sound-alike of it
-                 (radio_ready.rhymes; ranked by fit in the line and meaning; computed in the
-                 background); 1-4 for the first explicit word, 5-8 for the second
+                 (radio_ready.rhymes; scored by fit in the line and meaning, picked to differ
+                 from each other; computed in the background). Every explicit word of the
+                 line gets suggestions, numbered in order: 9 for one word, 4 each for two,
+                 3 each for three, fewer as there are more
 
 Every verdict is saved at once. All unvetted lines come first, the most distinctive rewrites
 before generic ones ("stuff", "things"; ordered by how rare the new words are in clean lyrics).
@@ -45,8 +49,8 @@ from tkinter import font as tkfont
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.pairs import (
-    SECTION_FILES, combine, export, load_sheet, only_nonsense, source_names, sources,
-    write_sheet,
+    SECTION_FILES, add_your_version, combine, export, load_sheet, only_nonsense, source_names,
+    sources, write_sheet,
 )
 from radio_ready.text import syllables
 
@@ -90,6 +94,14 @@ def load_sections(ids: set[str] | None = None) -> dict[str, tuple[str, dict]]:
     return found
 
 
+KEYS = 9  # Alt+1 ... Alt+9
+
+
+def per_word(n_slots: int) -> int:
+    """Suggestions per explicit word so that every word gets some within KEYS keys."""
+    return max(1, KEYS // max(1, n_slots))
+
+
 def slots(original: str, current: str, detector) -> list[dict]:
     """Where each explicit word of the original sits in the current line: the explicit word,
     the token span of current that replaces it, and trailing punctuation to keep."""
@@ -108,7 +120,7 @@ def slots(original: str, current: str, detector) -> list[dict]:
                 punct = re.search(r"[^\w']*$", b[j2 - 1] if j2 > j1 else token).group(0)
                 found.append({"word": words[0], "start": j1, "end": j2, "punct": punct})
                 break
-    return found[:2]
+    return found
 
 
 class App:
@@ -117,7 +129,7 @@ class App:
         # order[:boundary] are unvetted; a pause screen comes before the vetted ones
         self.boundary = len(order) if boundary is None else boundary
         self.paused, self.past_pause = False, False
-        self.sections, self.detector = sections, detector
+        self.sections, self.detector, self.source = sections, detector, title
         self.pos, self.history, self.context = 0, [], False
         self.suggestions, self.results, self.pending, self.slots = [], queue.Queue(), None, []
         base = tkfont.nametofont("TkDefaultFont").actual()["family"]
@@ -163,7 +175,7 @@ class App:
         self.edit.bind("<Tab>", lambda e: self.toggle() or "break")
         self.edit.bind("<Up>", lambda e: self.back() or "break")
         self.edit.bind("<Down>", lambda e: self.skip() or "break")
-        for n in range(1, 9):
+        for n in range(1, KEYS + 1):
             self.edit.bind(f"<Alt-Key-{n}>", lambda e, n=n: self.use_suggestion(n) or "break")
         self.show()
         self.poll()
@@ -177,7 +189,8 @@ class App:
         return self.sections[sid][1]["lines"] if sid in self.sections else []
 
     def proposed(self, row: dict) -> str:
-        return row.get("edit", "").strip() or row.get("rewrite", "") or row["original"]
+        """The line as the row proposes it (never an edit you made in another list)."""
+        return row.get("rewrite", "") or row["original"]
 
     def blank(self, message: str) -> None:
         self.header.config(text=message)
@@ -266,11 +279,21 @@ class App:
             return
         r = self.row()
         text = self.edit.get("1.0", "end").strip()
-        r["edit"] = text if text and text != r.get("rewrite", "") else ""
-        r["verdict"] = verdict
+        if verdict != "dislike" and text and text != self.proposed(r):
+            # your own version: a row of its own for this list; the proposal keeps its verdict
+            names = source_names(r) if self.source == ALL else {self.source}
+            if add_your_version(self.rows, r, text, verdict, names) is None:
+                # the same line has another verdict in another list: keep it on this row
+                r["edit"], r["verdict"] = text, verdict
+            else:
+                r["verdict"] = r.get("verdict") or "edited"
+            saved = f"your version of line {r['line']} ({verdict}, a pair of its own)"
+        else:
+            r["verdict"] = verdict
+            saved = f"line {r['line']} {verdict}"
         try:
             write_sheet(self.rows)
-            self.status.config(text=f"saved: line {r['line']} {verdict}")
+            self.status.config(text=f"saved: {saved}")
         except PermissionError:
             self.status.config(text="could not save: close the sheet in Excel (kept in memory)")
         self.history.append(self.pos)
@@ -335,12 +358,14 @@ class App:
             pos, current, found_slots, before = job
             tokens, out, err = current.split(" "), [], ""
             try:
+                k = per_word(len(found_slots))
                 for s in found_slots:
                     template = " ".join(tokens[:s["start"]] + ["<mask>" + s["punct"]]
                                         + tokens[s["end"]:])
-                    for c in suggest_for_word(template, s["word"], current, embed, k=4,
+                    for c in suggest_for_word(template, s["word"], current, embed, k=k,
                                               before=before):
                         out.append({**c, "slot": s})
+                out = out[:KEYS]
             except Exception as e:  # noqa: BLE001 (shown, never fatal)
                 err = str(e)
             self.results.put((pos, out, err))  # tkinter is only touched by the main thread

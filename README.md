@@ -32,6 +32,7 @@ src/radio_ready/
   scoring.py          similarity, toxicity and fluency models
   prompts.py          rewrite prompts and answer parsers
   generate.py         local-model rewrites with candidate selection
+  rhyme_swap.py       pairs from the end-rhyme thesaurus (explicit word -> clean rhyme)
   pairs.py            SFT pairs from generations
   commercial.py       copy-paste table for commercial LLMs
   compare.py          side-by-side scores of rewrite systems
@@ -59,12 +60,16 @@ On Linux/macOS use `source .venv/bin/activate`. The full run downloads ~4 GB and
 python -m radio_ready.pipeline
 ```
 
-Runs every step below in order and stops at the first failure. Options:
-`--from STEP`, `--to STEP`, `--only STEP [STEP ...]`, `--with-classifier` (step 4 is skipped
-by default; no other step depends on it). Example, after editing the vetting file:
+Runs every step below in order and stops at the first failure, ending with the pairs rebuilt
+from the committed patches (step 11): the vetted pairs are reconstructed without rerunning a
+model. Options: `--from STEP`, `--to STEP`, `--only STEP [STEP ...]` (named steps always
+run), `--with-classifier`, `--with-noise`, `--with-rhyme` (steps 4, 9 and 10 are skipped by
+default; no other step depends on them). Examples:
 
 ```bash
-python -m radio_ready.pipeline --from learned_lexicon
+python -m radio_ready.pipeline --only pairs                 # reconstruct the pairs only
+python -m radio_ready.pipeline --from learned_lexicon       # after editing the vetting file
+python -m radio_ready.pipeline --with-rhyme --with-noise    # also new rhyme / noise runs (GPU)
 ```
 
 | Step | Module | Inputs | Outputs |
@@ -77,6 +82,9 @@ python -m radio_ready.pipeline --from learned_lexicon
 | 6 | `genius` | Genius, Kidz Bop, step 3 | `data/processed/genius_sections.jsonl` |
 | 7 | `aae` | step 6, TwitterAAE | adds `aae_proportion` to step 6 output |
 | 8 | `commercial` | steps 5, 6 | `data/commercial/{prompt.txt,commercial_table.csv}` |
+| 9 | `noise` (optional) | step 5 | `outputs/generations/qwen2.5-7b-instruct-4bit_pilot_v9-noise-vowels_n5.jsonl` (`generate --style noise-vowels --samples 5`) |
+| 10 | `rhyme` (optional) | step 5 | `outputs/generations/rhyme_pilot_rhyme-v2.jsonl` (`rhyme_swap`) |
+| 11 | `pairs` | steps 5, 6, `pairs/*.patch.jsonl` | `pairs/<source>.{jsonl,md}`, `final.*`, `lines.*` (`pairs --rebuild`) |
 
 ### 2. Labels
 
@@ -145,7 +153,10 @@ the most common replacements from a word-level diff of original and Kidz Bop lin
 ### 6. Genius sections
 
 Cleaning: section headers become metadata (type, performers); credit headers, inline tags and
-scrape artifacts are removed; look-alike Cyrillic/Greek letters are mapped to Latin;
+scrape artifacts are removed; an exact repeat of 4 consecutive lines inside a section (a chorus
+written out twice) is dropped before sections are chosen (`repeats.py`; sections built before
+were migrated in place with `python -m radio_ready.repeats --migrate`, which keeps their ids,
+records `repeat_lines_dropped` and remaps the vetting sheets, patches and runs); look-alike Cyrillic/Greek letters are mapped to Latin;
 parenthetical ad-libs move to `adlibs`; lines without syllables are dropped; repeated sections
 are kept once.
 
@@ -299,6 +310,7 @@ Qwen3-14B needs `--cpu-embeddings`. Prompt styles (`--style`):
 | `stanza-free` | as `stanza`; lines may be reworded | detected words |
 | `plain` | whole section; the model decides what radio would censor | none |
 | `annotated` | whole section with syllable counts, rhyme letters and REWRITE marks | all |
+| `noise-vowels`, `noise-gibberish`, `noise-blank` | one per 4-line stanza; the explicit words are replaced by made-up sounds or blanks (`noise.py`) and the model fills them in | the noise words |
 
 Every style asks to keep the meaning, rhythm and syllable count, the end rhyme, the artist's
 voice, and slang, dialect, grammar and spelling. `--rhyme` (free styles) makes the model write
@@ -332,9 +344,38 @@ against the draft and on syllables and end rhyme against the original.
 python -m radio_ready.rewrite [--input FILE] [--limit N]    # pilot by default
 ```
 
-`pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the commercial
-models (`commercial_*`, from `python -m radio_ready.commercial --export`; they need your
-approval and may use the reserved commercial-evaluation sections). In `pairs/`:
+`rhyme_swap.py`: swap, then reword. Every explicit word of the line is first swapped for a
+clean word from the end-rhyme thesaurus (`rhymes.py`, the vetting app's Alt+n suggestions): 6
+varied words per explicit word that rhyme with it, with its syllable count (within one). The
+words of all explicit words are combined (up to 64 lines: 6 x 6 for two words, 4 x 4 x 4 for
+three, ...). The swaps are ranked without a model: the `generate.py` filters, then similarity +
+0.05 x masked-LM slot fit - CoLA fluency lost (the slot fit keeps the part of speech). A bare
+swap rarely makes sense ("Been through some bad exist"), so Qwen2.5-7B (4-bit, about 5.5 GB of
+GPU memory; always on) rewords 4 of them, the best first and then those whose words the others
+do not use: it sees the original line, the
+swapped line and two lines around it as plain text (no syllable counts or rhyme letters) and
+changes the words around the new word so the line makes sense and keeps its meaning, keeping
+the new word, the end rhyme and about the same syllables. An answer counts only if it keeps the
+new word, the end rhyme (rhymes with the original, or keeps the swapped end word) and is within
+2 syllables of the original. The best answer that passes the filters wins; bare swaps are never
+used as rewrites.
+
+```bash
+python -m radio_ready.rhyme_swap [--input FILE] [--limit N] [--k 6] [--drafts 4]
+# -> outputs/generations/rhyme_<input>_rhyme-v2.jsonl, source rhyme_<input>_rhyme-v2
+```
+
+Kidz Bop pilot (50 sections, 67 lines with an explicit word, GPU, about 5 s a section): 29 lines
+reworded, 17 of them usable (filters, CoLA drop <= 0.3), e.g. "stacked up like my pants" and
+"Ooh slick, I'm a dangerous man with some dough in my pocket". Of the 268 7B answers 129 dropped
+the rhyme word (often for a better one: "lay your truth bare"), 60 broke the end rhyme by adding
+words after it, and 21 went on to the next lyric line. Lines with no kept answer are on the
+sheet with an empty rewrite, for your edit.
+
+`pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the rhyme swaps
+(`rhyme_*`; they need your approval), the commercial models (`commercial_*`, from
+`python -m radio_ready.commercial --export`; they need your approval and may use the reserved
+commercial-evaluation sections). In `pairs/`:
 
 | File | Committed | Contents |
 | --- | --- | --- |
@@ -344,8 +385,13 @@ approval and may use the reserved commercial-evaluation sections). In `pairs/`:
 | `final.*` | patch yes | every source combined; identical pairs (same section, same rewrite) kept once |
 | `lines.*` | patch yes | one pair per line you liked or superliked (your edit if you made one), with its section as context and your `verdict` as a plain field; disliked lines never appear, and a liked line counts even when its section version is out |
 
-A version of a section becomes a pair when it passed the filters (or you approved all its
-lines), at least one line changed, nothing explicit is left, and none of its lines is disliked.
+Every version of a line you accepted is a pair of its own: the proposal when you liked or
+superliked it (or it passed the filters, needs no approval and you have not vetted it), and
+each of your own versions of it that you liked or superliked. A section gives one pair with the
+first accepted version of every line, plus one pair per further accepted version of a line.
+A section is left out when one of its lines has no accepted version and was disliked, or needs
+approval; and when something explicit is left. Identical pairs (same section, same lines) are
+kept once, within a source and in `final`; different versions are never merged.
 With the section records built (`download`, `kidzbop`, `genius`), the full pairs come back from
 the committed patches:
 
@@ -364,16 +410,25 @@ writes its pairs (new runs appear there); Combine writes `pairs/final`.
 One line at a time: the original with its explicit words highlighted and the rewrite in an
 edit field. Edit in place if needed, then Enter (like), Ctrl+Enter (superlike) or Esc (dislike);
 Up/Down go back or skip; Tab shows the 4-line stanza, original and rewritten (it closes on
-every new line). Alt+1-8 puts a suggestion in place of the explicit word: clean words that
-rhyme with the explicit word itself, with its syllable count, never a sound-alike of it
-(`rhymes.py`: CMU rhymes of words common in clean lyrics, ranked by masked-LM fit in the slot
-and meaning; `python -m radio_ready.rhymes --build` once). Distinctive rewrites come first,
+every new line). Alt+1-9 puts a suggestion in place of an explicit word: clean words that
+rhyme with the explicit word itself (perfect, slant or assonance: bitch -> cinch, kids, wish),
+with its syllable count, never a sound-alike of it or of its last sounds, never a word on the
+Surge list or Kidz Bop's profanity list (piss, crap) (`rhymes.py`: CMU rhymes of words common
+in clean lyrics, scored by masked-LM fit in the slot and meaning, then picked to differ from
+each other in meaning and sound; `python -m radio_ready.rhymes --build` once). Every explicit
+word of the line gets suggestions, numbered in order: 9 for one word, 4 each for two, 3 each
+for three, fewer as there are more. Distinctive rewrites come first,
 generic ones ("stuff", "things") last.
 
 All verdicts go to one sheet, `annotations/vetting.csv` (committed, no lyrics: rewrites and
 edits are diffs against the original line). It has one row per line and proposed rewrite, so a
 rewrite several sources proposed (the 7B/14B run, a commercial model) is vetted
-once and counts for all of them; `sources` lists who proposed it.
+once and counts for all of them; `sources` lists who proposed it. A line you change is a row of
+its own (status `your version`, for the list you vetted it in): the proposal keeps its own
+verdict, other lists still show the proposal, and each different version you write is a
+separate pair. The same version written in two lists is one row for both. (Older sheets kept
+one edit per row, so an edit in a second list replaced the first; those edits are split into
+rows of their own on load, and one edit lost that way came back from the sheet's history.)
 
 ### Commercial LLMs (copy-paste)
 
