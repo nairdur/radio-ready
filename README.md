@@ -60,12 +60,16 @@ On Linux/macOS use `source .venv/bin/activate`. The full run downloads ~4 GB and
 python -m radio_ready.pipeline
 ```
 
-Runs every step below in order and stops at the first failure. Options:
-`--from STEP`, `--to STEP`, `--only STEP [STEP ...]`, `--with-classifier` (step 4 is skipped
-by default; no other step depends on it). Example, after editing the vetting file:
+Runs every step below in order and stops at the first failure, ending with the pairs rebuilt
+from the committed patches (step 11): the vetted pairs are reconstructed without rerunning a
+model. Options: `--from STEP`, `--to STEP`, `--only STEP [STEP ...]` (named steps always
+run), `--with-classifier`, `--with-noise`, `--with-rhyme` (steps 4, 9 and 10 are skipped by
+default; no other step depends on them). Examples:
 
 ```bash
-python -m radio_ready.pipeline --from learned_lexicon
+python -m radio_ready.pipeline --only pairs                 # reconstruct the pairs only
+python -m radio_ready.pipeline --from learned_lexicon       # after editing the vetting file
+python -m radio_ready.pipeline --with-rhyme --with-noise    # also new rhyme / noise runs (GPU)
 ```
 
 | Step | Module | Inputs | Outputs |
@@ -78,6 +82,9 @@ python -m radio_ready.pipeline --from learned_lexicon
 | 6 | `genius` | Genius, Kidz Bop, step 3 | `data/processed/genius_sections.jsonl` |
 | 7 | `aae` | step 6, TwitterAAE | adds `aae_proportion` to step 6 output |
 | 8 | `commercial` | steps 5, 6 | `data/commercial/{prompt.txt,commercial_table.csv}` |
+| 9 | `noise` (optional) | step 5 | `outputs/generations/qwen2.5-7b-instruct-4bit_pilot_v9-noise-vowels_n5.jsonl` (`generate --style noise-vowels --samples 5`) |
+| 10 | `rhyme` (optional) | step 5 | `outputs/generations/rhyme_pilot_rhyme-v2.jsonl` (`rhyme_swap`) |
+| 11 | `pairs` | steps 5, 6, `pairs/*.patch.jsonl` | `pairs/<source>.{jsonl,md}`, `final.*`, `lines.*` (`pairs --rebuild`) |
 
 ### 2. Labels
 
@@ -146,7 +153,10 @@ the most common replacements from a word-level diff of original and Kidz Bop lin
 ### 6. Genius sections
 
 Cleaning: section headers become metadata (type, performers); credit headers, inline tags and
-scrape artifacts are removed; look-alike Cyrillic/Greek letters are mapped to Latin;
+scrape artifacts are removed; an exact repeat of 4 consecutive lines inside a section (a chorus
+written out twice) is dropped before sections are chosen (`repeats.py`; sections built before
+were migrated in place with `python -m radio_ready.repeats --migrate`, which keeps their ids,
+records `repeat_lines_dropped` and remaps the vetting sheets, patches and runs); look-alike Cyrillic/Greek letters are mapped to Latin;
 parenthetical ad-libs move to `adlibs`; lines without syllables are dropped; repeated sections
 are kept once.
 
@@ -300,6 +310,7 @@ Qwen3-14B needs `--cpu-embeddings`. Prompt styles (`--style`):
 | `stanza-free` | as `stanza`; lines may be reworded | detected words |
 | `plain` | whole section; the model decides what radio would censor | none |
 | `annotated` | whole section with syllable counts, rhyme letters and REWRITE marks | all |
+| `noise-vowels`, `noise-gibberish`, `noise-blank` | one per 4-line stanza; the explicit words are replaced by made-up sounds or blanks (`noise.py`) and the model fills them in | the noise words |
 
 Every style asks to keep the meaning, rhythm and syllable count, the end rhyme, the artist's
 voice, and slang, dialect, grammar and spelling. `--rhyme` (free styles) makes the model write
