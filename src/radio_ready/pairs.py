@@ -136,7 +136,7 @@ def generation_path(name: str) -> Path:
     return paths.GENERATIONS_DIR / f"{name}.jsonl"  # names contain dots ("qwen2.5-...")
 
 
-METHOD = re.compile(r"(?:solid|free|guided|rhyme)_.+_((?:solid|free|guided|rhyme)-v\d+)")
+METHOD = re.compile(r"(?:solid|free|guided|rhyme|sing)_.+_((?:solid|free|guided|rhyme|sing)-v\d+)")
 
 
 def method(stem: str) -> str:
@@ -654,25 +654,32 @@ def accepted_texts(rows: list[dict]) -> dict[tuple[str, int], list[tuple[str, bo
     return found
 
 
+def paired_ids() -> set[str]:
+    """Sections that some source already pairs (their pair patches, human excepted)."""
+    found = set()
+    for f in PAIRS_DIR.glob("*.patch.jsonl"):
+        if f.name.removesuffix(".patch.jsonl") not in (HUMAN, FINAL, LINES):
+            found |= {json.loads(l)["id"] for l in open(f, encoding="utf-8")}
+    return found
+
+
 def export_human(sections, rows: list[dict], detector) -> str:
-    """The human source: sections that the other sources leave incomplete, finished by you.
+    """The human source: sections that no single source pairs, completed across sources.
 
     A line of a section is asked in the vetting app's `human` list (a sheet row with status
     HUMAN_REQUEST, its rewrite empty) when the section has at least one accepted line, the
     line has a detected explicit word, no accepted version in any source (repeats share theirs)
     and no proposal still waiting for your verdict. Your versions written in that list are rows
-    with status `human: your version`. A section whose explicit lines all have an accepted
-    version and that uses at least one of yours from the human list is a pair of this source
-    (other lines: the first accepted version from any source; one more pair per further
-    version of a line you wrote here)."""
+    with status `human: your version`; radio_ready.sing proposes rewrites of the same lines. A
+    section that no source pairs by itself, and whose explicit lines all have an accepted
+    version in some source (yours included), is a pair of this source: the first accepted
+    version of each line, one more pair per further version of a line."""
     accepted = accepted_texts(rows)
     pending = {(r["id"], int(r["line"])) for r in rows
                if r.get("rewrite") and not r.get("verdict", "").strip()
                and not only_nonsense(r)}
     by_key = {row_key(r): r for r in rows}
-    mine = {(r["id"], int(r["line"])) for r in rows
-            if f"{HUMAN}: {YOURS}" in r.get("sources", "")
-            and r.get("verdict", "").strip().lower() in APPROVE}
+    paired = paired_ids()
     asked, pairs, seen = 0, [], set()
     for sid in sorted({r["id"] for r in rows}):
         if sid not in sections:
@@ -702,7 +709,7 @@ def export_human(sections, rows: list[dict], detector) -> str:
             if HUMAN not in source_names(row):
                 add_source(row, HUMAN, HUMAN_REQUEST)
             asked += 1
-        if any(not alts[i] for i in targets) or not any((sid, i + 1) in mine for i in targets):
+        if any(not alts[i] for i in targets) or sid in paired:
             continue
         verdicts = {str(i): alts[i][0][2] for i in targets if alts[i]}
         for version, edited, used in versions(list(lines), alts, verdicts, groups):
@@ -793,6 +800,35 @@ def write_lines(patches: list[dict], sections) -> list[dict]:
     return pairs
 
 
+SHARE_CSV = PAIRS_DIR / "share.csv"
+SHARE_COLUMNS = ["kind", "id", "line", "split", "source", "artist", "title", "section_header",
+                 "original", "rewrite", "changed_lines", "verdict", "edited_by_you", "from"]
+
+
+def write_share(sections_pairs: list[dict], line_pairs: list[dict]) -> Path:
+    """pairs/share.csv: one simple file with every section pair and line pair, to share by hand
+    (gitignored: it has lyrics). Section rows hold the whole section, one lyric line per line
+    of the cell; changed_lines are 1-based. UTF-8 with BOM, so Excel opens it."""
+    with open(SHARE_CSV, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(SHARE_COLUMNS)
+        for p in sections_pairs:
+            verdicts = p.get("human_verdicts") or {}
+            w.writerow(["section", p["id"], "", p["split"], p.get("source"), p.get("artist"),
+                        p.get("title"), p.get("section_header"), "\n".join(p["original"]),
+                        "\n".join(p["rewrite"]),
+                        " ".join(str(i + 1) for i in p.get("changed", [])),
+                        "; ".join(f"{int(k) + 1}: {v}" for k, v in sorted(
+                            verdicts.items(), key=lambda kv: int(kv[0]))),
+                        bool(p.get("edited")), "; ".join(p.get("from") or [])])
+        for p in line_pairs:
+            w.writerow(["line", p["id"], p["line"], p["split"], p.get("source"), p.get("artist"),
+                        p.get("title"), p.get("section_header"), p["original"], p["rewrite"],
+                        p["line"], p.get("verdict"), bool(p.get("edited")),
+                        "; ".join(p.get("proposed_by") or [])])
+    return SHARE_CSV
+
+
 def combine() -> str:
     """pairs/final.*: every source's pairs, identical pairs (same section, same rewrite) once;
     pairs/lines.*: every liked or superliked line as a pair of its own."""
@@ -822,6 +858,7 @@ def combine() -> str:
     write_pairs(FINAL, pairs)
     lines = write_lines(line_patches(load_sheet(sections), sections, ExplicitDetector()),
                         sections)
+    write_share(pairs, lines)
     return (f"final: {len(pairs)} pairs {dict(Counter(p['split'] for p in pairs))}, "
             f"{sum(p['edited'] for p in pairs)} with a line you wrote; from {dict(counts)}\n"
             f"lines: {len(lines)} line pairs {dict(Counter(p['split'] for p in lines))}, "

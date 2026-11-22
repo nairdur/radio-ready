@@ -21,6 +21,7 @@ One line per experiment; details in the linked files. Human vetting numbers are 
 | **free v2** (`free.py`, 7B, section context, stock swaps named) | **Best local method: 66% accepted as written, 10% disliked (113 lines)**, close to Gemini (73% / 13%) and better than Claude (64% / 24%). Chosen for the training data. [free_prompt.md](free_prompt.md) |
 | free v3 (mined stock swaps per explicit word) | Stock swaps in rewritten lines: 7 of 20 against 12 of 22 for v2 on the same sections. Running on Genius sections 118-817; not vetted yet. |
 | free v1 | 61% accepted, 12% disliked. Naming the stock swaps (v2) cut them from 11 to 4 of 27 lines. |
+| sing v2 (`sing.py`, 7B meaning draft + sing pass) on the human-list lines | 62 of 101 lines proposed (55 drafts, 7 sung); the draft wins unless it breaks rhyme or meter. The draft sometimes returns another line of the stanza; candidates must now keep meaning to the original and not copy a line. Not vetted yet. |
 | solid (`rewrite.py`, 7B draft + 14B) | 53% accepted, 21% disliked; proposes far fewer lines (8 of 27 on Genius). |
 | `generate.py` whole section (v1) | Left explicit words in 37% of pilot sections and changed 27% of clean lines. |
 | `generate.py` marked lines (v3, v5) | Clean in 90% of pilot sections, close syllables and rhyme; 44% accepted when vetted. The 7B standardizes dialect (gon' -> 'll). |

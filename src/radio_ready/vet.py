@@ -455,12 +455,13 @@ def open_source(window, name: str, rows, sections) -> bool:
     after a pause screen, the lines already vetted."""
     mine = [k for k, r in enumerate(rows) if name == ALL or name in source_names(r)]
     unvetted = [k for k in mine if not rows[k].get("verdict") and not only_nonsense(rows[k])]
-    if name == HUMAN:  # lines to write: asked until you have an accepted version of them
-        written = {(r["id"], r["line"]) for r in rows
-                   if f"{HUMAN}: {YOURS}" in r.get("sources", "")
-                   and r.get("verdict", "").strip().lower() in APPROVE}
+    if name == HUMAN:  # lines to write: asked until any source has an accepted version of
+        # them, and not while a proposal of them (e.g. sing-v2) waits for your verdict
+        settled = {(r["id"], r["line"]) for r in rows
+                   if r.get("verdict", "").strip().lower() in APPROVE
+                   or (r.get("rewrite") and not r.get("verdict", "").strip())}
         unvetted = [k for k in mine if f"{HUMAN}: {HUMAN_REQUEST}" in rows[k].get("sources", "")
-                    and (rows[k]["id"], rows[k]["line"]) not in written]
+                    and (rows[k]["id"], rows[k]["line"]) not in settled]
     # Repeated lines of a section share their versions (radio_ready.pairs.share_repeats): skip
     # a line when another occurrence of it already has an accepted version, or when the same
     # rewrite of it is already in the queue.
@@ -545,9 +546,8 @@ class Launcher:
             asked = {(r["id"], r["line"]) for r in self.rows
                      if f"{HUMAN}: {HUMAN_REQUEST}" in r.get("sources", "")}
             done = {(r["id"], r["line"]) for r in self.rows
-                    if f"{HUMAN}: {YOURS}" in r.get("sources", "")
-                    and r.get("verdict", "").strip().lower() in APPROVE} & asked
-            return f"{len(done)}/{len(asked)} lines written" if asked else "nothing to finish"
+                    if r.get("verdict", "").strip().lower() in APPROVE} & asked
+            return f"{len(done)}/{len(asked)} lines finished" if asked else "nothing to finish"
         rows = [r for r in self.rows if (name == ALL or name in source_names(r))
                 and not only_nonsense(r)]
         if not rows:

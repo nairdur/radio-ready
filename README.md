@@ -32,6 +32,7 @@ src/radio_ready/
   aae.py              AAE vernacular proportion
   scoring.py          similarity, toxicity and fluency models
   free.py             synthetic rewrites (7B, section context; the method used)
+  sing.py             surgical singable rewrites of the lines that keep sections unpaired
   pairs.py            pairs from generations and the vetting sheet
   vet.py, rhymes.py   human vetting app and its rhyme suggestions (vet.bat)
   paradehate.py       ParaDeHate pairs in the same format
@@ -386,6 +387,7 @@ commercial-evaluation sections). In `pairs/`:
 | `<source>.md` | no (lyrics) | side-by-side view |
 | `final.*` | patch yes | every source combined; identical pairs (same section, same rewrite) kept once |
 | `lines.*` | patch yes | one pair per line you liked or superliked (your edit if you made one), with its section as context and your `verdict` as a plain field; disliked lines never appear, and a liked line counts even when its section version is out |
+| `share.csv` | no (lyrics) | one simple file to share by hand: every section pair (whole section per cell, `changed_lines`, verdicts) and every line pair (`kind` = section / line), rewritten on every update; opens in Excel |
 
 Every version of a line you accepted is a pair of its own: the proposal when you liked or
 superliked it (or it passed the filters, needs no approval and you have not vetted it), and
@@ -437,9 +439,14 @@ lines has no accepted version. The `human` list at the top of the start window a
 those lines: the section has accepted lines, but this line has no accepted version in any source
 and no proposal waiting for your verdict (every proposal was disliked, or no model rewrote it).
 You write the clean line (Alt+1-9 for rhymes; Enter only saves a clean, changed line; Esc
-skips). A section whose lines are then all covered is a pair of the `human` source: your
-accepted lines from any source plus the lines you wrote there. On the current sheet: 100 lines
-in 53 sections.
+skips). `python -m radio_ready.sing` proposes surgical, singable rewrites of the same lines
+(source `sing-v2`): a 7B meaning draft that replaces only the explicit words, then sampled
+rewrites that make it sing (syllables and rhyme partners given); a candidate must keep the
+meaning (cosine >= 0.70 to the draft and to the original) and not copy another line. Vet them in
+the `sing-v2` list first; the `human` list then shows only lines with no accepted or pending
+version. A section that no source pairs by itself, and whose explicit lines all have an
+accepted version somewhere (yours included), is a pair of the `human` source. First run: 101
+lines in 53 sections, 62 with a proposal (55 drafts, 7 sung rewrites) in 6 minutes.
 
 Rhyme suggestions also cover rap spellings missing from the CMU dictionary (-a, -as, -az for
 -er, -ers: playa, killa, nigga): their pronunciation comes from the -er form. Explicit words,
