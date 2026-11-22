@@ -180,24 +180,26 @@ def sources() -> dict[str, dict]:
     return found
 
 
-_SCORERS: dict = {}
+_SCORERS: dict = {}  # sensible() results, per process
 
 
 def sensible(original: list[str], lines: list[str]) -> bool:
     """Every changed line keeps the meaning (all-distilroberta-v1 cosine to its original >=
     0.70, the ParaDeHate threshold) and reads as well as the original (CoLA acceptability drop
     <= MAX_FLUENCY_DROP). Filters out nonsense lines before anyone has to vet them."""
-    from radio_ready.scoring import SIMILARITY_THRESHOLD, Fluency, Similarity
+    from radio_ready.scoring import SIMILARITY_THRESHOLD, shared
 
     changed = [i for i, (a, b) in enumerate(zip(original, lines)) if a != b]
     if not changed:
         return False
-    if not _SCORERS:
-        _SCORERS.update(sim=Similarity(on="cpu"), flu=Fluency(on="cpu"))
     a, b = [original[i] for i in changed], [lines[i] for i in changed]
-    sims = _SCORERS["sim"].pairwise(b, a)
-    drop = _SCORERS["flu"].score(a) - _SCORERS["flu"].score(b)
-    return bool((sims >= SIMILARITY_THRESHOLD).all() and (drop <= MAX_FLUENCY_DROP).all())
+    key = (tuple(a), tuple(b))
+    if key not in _SCORERS:  # remembered: an update does not score the same version again
+        sims = shared("similarity").pairwise(b, a)
+        drop = shared("fluency").score(a) - shared("fluency").score(b)
+        _SCORERS[key] = bool((sims >= SIMILARITY_THRESHOLD).all()
+                             and (drop <= MAX_FLUENCY_DROP).all())
+    return _SCORERS[key]
 
 
 # --- vetting sheet --------------------------------------------------------------------------

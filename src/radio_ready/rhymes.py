@@ -159,9 +159,16 @@ class SlotFit:
         return np.array(out)
 
 
-@lru_cache(maxsize=1)
+_SLOT_FIT: list = []
+_SLOT_LOCK = __import__("threading").Lock()
+
+
 def slot_fit() -> SlotFit:
-    return SlotFit()
+    """One masked LM per process, safe to ask for from several threads (vetting windows)."""
+    with _SLOT_LOCK:
+        if not _SLOT_FIT:
+            _SLOT_FIT.append(SlotFit())
+        return _SLOT_FIT[0]
 
 
 def replace_end(line: str, word: str) -> str:

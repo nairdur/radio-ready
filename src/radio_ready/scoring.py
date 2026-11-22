@@ -85,3 +85,17 @@ class Fluency:
             ).to(self.model.device)
             out.append(torch.softmax(self.model(**batch).logits, -1)[:, 0].float().cpu().numpy())
         return np.concatenate(out) if out else np.array([])
+
+
+_SHARED: dict = {}
+_SHARED_LOCK = __import__("threading").Lock()
+
+
+def shared(kind: str):
+    """One CPU copy per process of a scorer ("similarity", "fluency", "toxicity"), loaded on
+    first use and reused after, from any thread (the vetting app loads each model once)."""
+    with _SHARED_LOCK:
+        if kind not in _SHARED:
+            _SHARED[kind] = {"similarity": Similarity, "fluency": Fluency,
+                             "toxicity": Toxicity}[kind](on="cpu")
+        return _SHARED[kind]

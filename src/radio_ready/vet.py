@@ -345,10 +345,10 @@ class App:
 
     def work(self) -> None:
         from radio_ready.rhymes import suggest_for_word
-        from radio_ready.scoring import Similarity
+        from radio_ready.scoring import shared
 
         try:
-            sim = Similarity(on="cpu")
+            sim = shared("similarity")  # one copy for the app, not one per window
             embed = lambda t: sim.model.encode(t, normalize_embeddings=True)  # noqa: E731
         except Exception as e:  # noqa: BLE001
             self.results.put((None, [], str(e)))
