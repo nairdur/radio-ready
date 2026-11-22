@@ -373,8 +373,13 @@ commercial-evaluation sections). In `pairs/`:
 | `<source>.md` | no (lyrics) | side-by-side view |
 | `final.*` | patch yes | every source combined; identical pairs (same section, same rewrite) kept once |
 
-A version of a section becomes a pair when it passed the filters (or you approved all its
-lines), at least one line changed, nothing explicit is left, and none of its lines is disliked.
+Every version of a line you accepted is a pair of its own: the proposal when you liked or
+superliked it (or it passed the filters, needs no approval and you have not vetted it), and
+each of your own versions of it that you liked or superliked. A section gives one pair with the
+first accepted version of every line, plus one pair per further accepted version of a line.
+A section is left out when one of its lines has no accepted version and was disliked, or needs
+approval; and when something explicit is left. Identical pairs (same section, same lines) are
+kept once, within a source and in `final`; different versions are never merged.
 With the section records built (`download`, `kidzbop`, `genius`), the full pairs come back from
 the committed patches:
 
@@ -405,7 +410,12 @@ generic ones ("stuff", "things") last.
 All verdicts go to one sheet, `annotations/vetting.csv` (committed, no lyrics: rewrites and
 edits are diffs against the original line). It has one row per line and proposed rewrite, so a
 rewrite several sources proposed (the 7B/14B run, a commercial model) is vetted
-once and counts for all of them; `sources` lists who proposed it.
+once and counts for all of them; `sources` lists who proposed it. A line you change is a row of
+its own (status `your version`, for the list you vetted it in): the proposal keeps its own
+verdict, other lists still show the proposal, and each different version you write is a
+separate pair. The same version written in two lists is one row for both. (Older sheets kept
+one edit per row, so an edit in a second list replaced the first; those edits are split into
+rows of their own on load, and one edit lost that way came back from the sheet's history.)
 
 ### Commercial LLMs (copy-paste)
 

@@ -7,8 +7,10 @@ pairs/final (every source, identical pairs once). New runs show up after Export.
 
 The vetting window shows one line: the original with its explicit words highlighted and the
 proposed rewrite in an edit field. A rewrite that several sources proposed for the same line is
-one row (annotations/vetting.csv), so it is vetted once. Change the text if you want (saved as
-your edit), then:
+one row (annotations/vetting.csv), so it is vetted once. Change the text if you want: your
+version is saved as a row of its own for the list you are vetting (radio_ready.pairs.
+add_your_version) and becomes a pair of its own; the proposal keeps its verdict (a like on it
+is never replaced), and another list shows the proposal, not your version. Then:
 
   Enter          like
   Ctrl+Enter     superlike
@@ -45,8 +47,8 @@ from tkinter import font as tkfont
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.pairs import (
-    SECTION_FILES, combine, export, load_sheet, only_nonsense, source_names, sources,
-    write_sheet,
+    SECTION_FILES, add_your_version, combine, export, load_sheet, only_nonsense, source_names,
+    sources, write_sheet,
 )
 from radio_ready.text import syllables
 
@@ -122,7 +124,7 @@ def slots(original: str, current: str, detector) -> list[dict]:
 class App:
     def __init__(self, root, rows, order, sections, detector, title):
         self.root, self.rows, self.order = root, rows, order
-        self.sections, self.detector = sections, detector
+        self.sections, self.detector, self.source = sections, detector, title
         self.pos, self.history, self.context = 0, [], False
         self.suggestions, self.results, self.pending, self.slots = [], queue.Queue(), None, []
         base = tkfont.nametofont("TkDefaultFont").actual()["family"]
@@ -182,7 +184,8 @@ class App:
         return self.sections[sid][1]["lines"] if sid in self.sections else []
 
     def proposed(self, row: dict) -> str:
-        return row.get("edit", "").strip() or row.get("rewrite", "") or row["original"]
+        """The line as the row proposes it (never an edit you made in another list)."""
+        return row.get("rewrite", "") or row["original"]
 
     def show(self) -> None:
         if self.pos >= len(self.order):
@@ -251,11 +254,18 @@ class App:
             return
         r = self.row()
         text = self.edit.get("1.0", "end").strip()
-        r["edit"] = text if text and text != r.get("rewrite", "") else ""
-        r["verdict"] = verdict
+        if verdict != "dislike" and text and text != self.proposed(r):
+            # your own version: a row of its own for this list; the proposal keeps its verdict
+            names = source_names(r) if self.source == ALL else {self.source}
+            add_your_version(self.rows, r, text, verdict, names)
+            r["verdict"] = r.get("verdict") or "edited"
+            saved = f"your version of line {r['line']} ({verdict}, a pair of its own)"
+        else:
+            r["verdict"] = verdict
+            saved = f"line {r['line']} {verdict}"
         try:
             write_sheet(self.rows)
-            self.status.config(text=f"saved: line {r['line']} {verdict}")
+            self.status.config(text=f"saved: {saved}")
         except PermissionError:
             self.status.config(text="could not save: close the sheet in Excel (kept in memory)")
         self.history.append(self.pos)
