@@ -10,6 +10,7 @@ Cleaning per song:
   - Cyrillic/Greek look-alike letters are mapped to Latin
   - parenthetical ad-libs are moved from the line to an `adlibs` field
   - lines with no syllables ("Mm") are dropped
+  - an exact repeat of 4 consecutive lines inside a section is dropped (radio_ready.repeats)
   - repeated sections are kept once, with a repeat count
 
 A section is eligible when its type is in LYRIC_TYPES, it has --min-lines to --max-lines
@@ -33,6 +34,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from radio_ready import paths
+from radio_ready.repeats import drop_repeats
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.text import (
     HOMOGLYPHS, normalize, rhyme_scheme, split_adlibs, stress, syllables,
@@ -93,6 +95,7 @@ def split_sections(lyrics: str) -> list[Section]:
     def close() -> None:
         nonlocal current
         if current is not None and current.lines:
+            current.lines = drop_repeats(current.lines)  # a chorus written out twice: once
             sections.append(current)
         current = None
 
