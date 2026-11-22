@@ -60,3 +60,4 @@ desktop.ini
 pairs/*.jsonl
 pairs/*.md
 !pairs/*.patch.jsonl
+pairs/*.pdf

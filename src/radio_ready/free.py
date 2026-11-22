@@ -18,14 +18,23 @@ original line) x fluency (CoLA, relative to the original). Lines with no clean r
 --retries new calls, the block shown with the rewrites already accepted. A line with no
 clean rewrite after that gets no proposal: an explicit line is never proposed.
 
+--version 2 (default) also names the stock swaps of the vetting sheet (generic replacements
+used 5+ times for an explicit word: shit -> stuff, bitch -> girl, fuck -> mess, ...) and asks
+for a creative rewrite of the phrase instead; rewrites that bring in one of them rank below
+those that do not, and the style examples are liked edits without one. --version 1 is the
+first prompt.
+
 Output: outputs/generations/free_<input>_<VERSION>.jsonl in the radio_ready.generate format;
 the vetting app lists it as its own source.
 
-Run:  python -m radio_ready.free [--input FILE] [--limit 10] [--samples 4] [--retries 1]
+Run:  python -m radio_ready.free [--input FILE] [--offset 0] [--limit 10] [--version 2]
+                                [--samples 4] [--retries 1]
 """
 
 import argparse
+import difflib
 import json
+from collections import Counter
 import re
 import time
 from functools import lru_cache
@@ -39,7 +48,7 @@ from radio_ready.rewrite import load, rhyme_instruction, unload
 from radio_ready.scoring import TOXICITY_THRESHOLD, Fluency, Similarity, Toxicity
 from radio_ready.text import end_rhyme_kept, syllables
 
-VERSION = "free-v1"
+VERSIONS = {1: "free-v1", 2: "free-v2"}
 MODEL = "Qwen/Qwen2.5-7B-Instruct"
 N_EXAMPLES = 6
 
@@ -63,24 +72,68 @@ place;
 fix grammar or spelling);
 - keep its syllable count and its end rhyme as given above, so it flows like the original;
 - use real words only.
-Copy the unmarked lines exactly as they are.
+{creative}Copy the unmarked lines exactly as they are.
 
 Radio edits of other songs, for the style:
 {examples}
 
 Answer with the four lines, numbered 1. to 4., and nothing else."""
 
+CREATIVE = """Do not just swap a censored word for a stock substitute ({generic}): those make every radio edit sound the same. Rework the phrase around it with fresh words or an image that fits this verse, the way the artist could have written it clean.
+"""
+
+STOP = {"it", "the", "a", "an", "you", "so", "your", "to", "with", "i", "me", "that", "no",
+        "be", "up", "get", "got", "yeah", "my", "of", "in", "on", "and", "is", "this"}
+MIN_SWAPS = 5
+
 NUMBERED = re.compile(r"^\s*(?:>>>\s*)?([1-4])[.):]\s*(.*)$")
 WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 
 
-def examples(exclude_ids: set[str], k: int = N_EXAMPLES) -> list[tuple[str, str]]:
-    """Up to k (original, edit) line pairs you liked, your own edits first, one per song."""
+@lru_cache(maxsize=1)
+def sheet_rows() -> list[dict]:
     from radio_ready.pairs import load_sections, load_sheet
 
-    rows = [r for r in load_sheet(load_sections())
-            if r.get("verdict") in ("like", "superlike") and r["id"] not in exclude_ids
-            and r.get("original")]
+    return [r for r in load_sheet(load_sections()) if r.get("original")]
+
+
+def swaps(original: str, new: str, detector) -> list[tuple[str, str]]:
+    """(explicit words, replacement) for each replaced span of `new` that held one."""
+    a, b = original.lower().split(), new.lower().split()
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        src = " ".join(a[i1:i2])
+        if op == "replace" and detector.find(src):
+            out.append((src, " ".join(w.strip(",.!?'\"") for w in b[j1:j2])))
+    return out
+
+
+@lru_cache(maxsize=1)
+def generic_words() -> tuple[str, ...]:
+    """Replacement words used MIN_SWAPS+ times for an explicit word in the vetting sheet (every
+    proposal and edit): the stock swaps, most frequent first."""
+    detector, counts = ExplicitDetector(), Counter()
+    for r in sheet_rows():
+        new = (r.get("edit") or "").strip() or r.get("rewrite", "")
+        for _, dst in swaps(r["original"], new, detector) if new else []:
+            if len(dst.split()) == 1 and dst not in STOP and dst and not detector.find(dst):
+                counts[dst] += 1
+    return tuple(w for w, n in counts.most_common() if n >= MIN_SWAPS)
+
+
+def generic_in(new: str, original: str) -> list[str]:
+    """Stock-swap words the rewrite brings in (not already in the original line)."""
+    have = {w.lower() for w in WORD.findall(original)}
+    return [w for w in WORD.findall(new) if w.lower() not in have
+            and w.lower() in set(generic_words())]
+
+
+def examples(exclude_ids: set[str], k: int = N_EXAMPLES,
+             creative: bool = False) -> list[tuple[str, str]]:
+    """Up to k (original, edit) line pairs you liked, your own edits first, one per song;
+    `creative`: none that brings in a stock-swap word."""
+    rows = [r for r in sheet_rows()
+            if r.get("verdict") in ("like", "superlike") and r["id"] not in exclude_ids]
     edited = [r for r in rows if (r.get("edit") or "").strip()]
     plain = [r for r in rows if not (r.get("edit") or "").strip() and r.get("rewrite")
              and r.get("verdict") == "superlike"]
@@ -88,6 +141,8 @@ def examples(exclude_ids: set[str], k: int = N_EXAMPLES) -> list[tuple[str, str]
     for r in edited + plain:
         new = (r.get("edit") or "").strip() or r["rewrite"]
         if r["id"] in seen or new == r["original"]:
+            continue
+        if creative and generic_in(new, r["original"]):
             continue
         seen.add(r["id"])
         out.append((r["original"], new))
@@ -183,19 +238,22 @@ class Scorer:
                  "syllable_diff": abs(syllables(new[n]) - syllables(old[n])),
                  "rhymes": end_rhyme_kept(old[n], new[n]),
                  "fluency_drop": round(max(float(flu[n] - flu[len(old) + n]), 0.0), 3),
-                 "non_words": non_words(new[n], old[n]), "unchanged": new[n] == old[n]}
+                 "non_words": non_words(new[n], old[n]), "unchanged": new[n] == old[n],
+                 "generic": generic_in(new[n], old[n])}
             c["ok"] = bool(not c["explicit"] and c["toxicity"] < TOXICITY_THRESHOLD
                            and not c["non_words"] and not c["unchanged"])
             out.append(c)
         return out
 
 
-def rank(c: dict) -> tuple:
-    return (not c["ok"], c["syllable_diff"] > 1, not c["rhymes"],
+def rank(c: dict, version: int = 2) -> tuple:
+    generic = bool(c.get("generic")) if version >= 2 else False
+    return (not c["ok"], generic, c["syllable_diff"] > 1, not c["rhymes"],
             -c["similarity"] * (1 - c["fluency_drop"]))
 
 
-def ask(tok, model, scorer, record, lines, start, todo, shot_text, samples, attempt):
+def ask(tok, model, scorer, record, lines, start, todo, shot_text, samples, attempt,
+        version=2):
     """Scored rewrites {line index: [candidates]} of the lines `todo` of one 4-line block,
     shown with the current `lines` (rewrites already accepted are filled in)."""
     from radio_ready.generate import complete
@@ -204,7 +262,9 @@ def ask(tok, model, scorer, record, lines, start, todo, shot_text, samples, atte
     targets = {i: sorted(set(detector.find(record["lines"][i]))) for i in todo}
     shown, notes = block_text(lines, start, targets, record, detector)
     user = PROMPT.format(title=record["title"], artist=record["artist"], block=shown,
-                         flagged=notes, examples=shot_text)
+                         flagged=notes, examples=shot_text,
+                         creative=CREATIVE.format(generic=", ".join(
+                             f'"{w}"' for w in generic_words()[:12])) if version >= 2 else "")
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
     raws = complete(tok, model, msgs, 1, 256, 0.0, 1.0, False)
     if samples:
@@ -225,7 +285,9 @@ def ask(tok, model, scorer, record, lines, start, todo, shot_text, samples, atte
 def main() -> None:
     parser = argparse.ArgumentParser(description="Freer 7B radio edits of flagged lines.")
     parser.add_argument("--input", default=str(paths.GENIUS_SECTIONS_JSONL))
+    parser.add_argument("--offset", type=int, default=0, help="skip the first N sections")
     parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--version", type=int, choices=sorted(VERSIONS), default=2)
     parser.add_argument("--name", default=None)
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--samples", type=int, default=4)
@@ -237,15 +299,16 @@ def main() -> None:
     skip = reserved_ids()
     records = [json.loads(l) for l in open(args.input, encoding="utf-8")]
     records = [r for r in records if r["id"] not in skip and target_lines(r, detector)]
-    records = records[: args.limit]
-    shots = examples({r["id"] for r in records})
+    records = records[args.offset: args.offset + args.limit]
+    shots = examples({r["id"] for r in records}, creative=args.version >= 2)
+    by_rank = lambda c: rank(c, args.version)  # noqa: E731
     shot_text = "\n".join(f'- "{a}" -> "{b}"' for a, b in shots) or "- (none yet)"
     scorer = Scorer(detector)
     lyric_words()
     tok, model = load(args.model, False)
     started = time.time()
 
-    name = args.name or f"free_{Path(args.input).stem}_{VERSION}"
+    name = args.name or f"free_{Path(args.input).stem}_{VERSIONS[args.version]}"
     out = paths.GENERATIONS_DIR / f"{name}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
@@ -258,11 +321,11 @@ def main() -> None:
                 todo = [i for i in sorted(targets) if start <= i < start + 4]
                 for attempt in range(args.retries + 1):
                     found, raw = ask(tok, model, scorer, record, lines, start, todo,
-                                     shot_text, args.samples, attempt)
+                                     shot_text, args.samples, attempt, args.version)
                     raws += raw
                     for i, cs in found.items():
                         cands[i] += cs
-                        best = min(cands[i], key=rank, default=None)
+                        best = min(cands[i], key=by_rank, default=None)
                         if best and best["ok"]:
                             lines[i] = best["line"]
                     todo = [i for i in todo if not any(c["ok"] for c in cands[i])]
@@ -270,7 +333,7 @@ def main() -> None:
                         break
             units = []
             for i in sorted(targets):
-                order = sorted(range(len(cands[i])), key=lambda k: rank(cands[i][k]))
+                order = sorted(range(len(cands[i])), key=lambda k: by_rank(cands[i][k]))
                 chosen = order[0] if order and cands[i][order[0]]["ok"] else None
                 units.append({"start": i, "end": i + 1, "chosen": chosen,
                               "candidates": cands[i]})
@@ -279,7 +342,7 @@ def main() -> None:
                 u["candidates"][u["chosen"]]["syllable_diff"] <= 1
                 and u["candidates"][u["chosen"]]["rhymes"] for u in done)
             f.write(json.dumps({
-                "id": record["id"], "model": args.model, "prompt_version": VERSION,
+                "id": record["id"], "model": args.model, "prompt_version": VERSIONS[args.version],
                 "style": "free", "samples": args.samples, "temperature": 1.0,
                 "targets": sorted(targets), "raw": raws,
                 "rewrites": {str(i): l for i, (l, o) in enumerate(zip(lines, record["lines"]))
