@@ -35,6 +35,7 @@ src/radio_ready/
   rhyme_swap.py       pairs from the end-rhyme thesaurus (explicit word -> clean rhyme)
   pairs.py            SFT pairs from generations
   commercial.py       copy-paste table for commercial LLMs
+  commercial_batch.py batch prompts of new lines for commercial LLMs
   compare.py          side-by-side scores of rewrite systems
   text.py             normalization, syllables, stress, rhyme
   cmu.py              CMU Pronouncing Dictionary lookups (reads data/raw/cmudict)
@@ -450,6 +451,21 @@ answer fits in one cell. No import step: `compare` reads the filled cells direct
 answers it cannot use (wrong number of lines). Re-running the step only adds new rows and model
 columns and never changes filled cells; close the file in Excel first. Options:
 `python -m radio_ready.commercial --genius-sections 100 --models gpt-5`.
+
+Batches of new lines, one chat message each (`commercial_batch.py`):
+
+```bash
+python -m radio_ready.commercial_batch --items 50   # data/commercial/batches/batch_NNN.txt
+python -m radio_ready.commercial_batch --export     # after pasting the answers
+```
+
+Each batch holds lines you do not have yet: sections already in the vetting sheet, a
+generation run, the commercial table or an earlier batch are left out, and so are lines whose
+text is already in one of them. One item per section and one per song: a 4-line stanza whose
+lines are all explicit, rewritten as a whole, or else a single explicit line with no context.
+Paste the prompt into Claude or Gemini and the whole numbered answer into
+`batch_NNN_<model>.txt` next to it; `--export` writes `commercial_batch_<model>.jsonl`, which
+the vetting app lists as its own source (approval required).
 
 ### Side-by-side comparison
 
