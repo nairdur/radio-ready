@@ -1,0 +1,1 @@
+{"id": "91089e013b08", "source": "genius", "from": ["guided-v1"], "edited": false, "artist": "!!! (Chk Chk Chk)", "title": "Bam City", "section_header": "Chorus", "split": "test", "model": "Qwen/Qwen2.5-7B-Instruct", "prompt_version": "guided-v1", "style": "guided", "human_edited": [], "human_verdicts": {"1": "superlike"}, "diff": {"1": [[1, 5, "experiences"]]}}

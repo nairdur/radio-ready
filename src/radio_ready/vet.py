@@ -1,9 +1,12 @@
 """Quick human vetting of synthetic rewrites, one line at a time (tkinter, no extra installs).
 
-Double-click vet.bat: a start window lists every source (radio_ready.pairs: the 7B/14B runs,
-the commercial models) with how many of its lines you have vetted, plus
-"All sources". Enter or double-click opens one; Export pairs writes its pairs; Combine writes
-pairs/final (every source, identical pairs once). New runs show up after Export.
+Double-click vet.bat: a start window lists every source (radio_ready.pairs.sources: every run
+in outputs/generations, runs of one method grouped, whatever sections or batch they cover)
+with how many of its lines you have vetted, plus "All sources". Enter or double-click opens
+one. Nothing to export by hand: when the window opens and whenever you close a vetting window,
+everything is updated in the background (radio_ready.pairs.update: new runs added, every
+source's pairs, pairs/final and pairs/lines). A vetting window asked for meanwhile opens when
+the update is done.
 
 The vetting window shows one line: the original with its explicit words highlighted and the
 proposed rewrite in an edit field. A rewrite that several sources proposed for the same line is
@@ -49,8 +52,8 @@ from tkinter import font as tkfont
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.pairs import (
-    SECTION_FILES, add_your_version, combine, export, load_sheet, only_nonsense, source_names,
-    sources, write_sheet,
+    SECTION_FILES, add_your_version, load_sheet, only_nonsense, source_names, sources, update,
+    write_sheet,
 )
 from radio_ready.text import syllables
 
@@ -421,15 +424,15 @@ def open_source(window, name: str, rows, sections) -> bool:
 
 
 class Launcher:
-    """Start window: pick a source and vet it, export its pairs, or combine everything."""
+    """Start window: pick a source and vet it. Pairs update by themselves in the background."""
 
     def __init__(self, root):
         self.root = root
         root.title("RadioReady vetting")
         root.geometry("760x440")
         base = tkfont.nametofont("TkDefaultFont").actual()["family"]
-        tk.Label(root, text="Double-click or Enter to vet. Export pairs writes the selected "
-                            "source's pairs; Combine writes pairs/final.",
+        tk.Label(root, text="Double-click or Enter to vet. New runs and all pairs update by "
+                            "themselves when this window opens and after each vetting window.",
                  anchor="w", fg="#555").pack(fill="x", padx=12, pady=(10, 4))
         self.list = tk.Listbox(root, font=(base, 12), activestyle="dotbox")
         self.list.pack(fill="both", expand=True, padx=12)
@@ -438,73 +441,108 @@ class Launcher:
         bar = tk.Frame(root)
         bar.pack(fill="x", padx=12, pady=8)
         tk.Button(bar, text="Vet", width=12, command=self.open).pack(side="left")
-        tk.Button(bar, text="Export pairs", width=12,
-                  command=self.export).pack(side="left", padx=8)
-        tk.Button(bar, text="Combine", width=12, command=self.combine).pack(side="left", padx=8)
         self.status = tk.Label(root, anchor="w", fg="#777", justify="left", wraplength=730)
         self.status.pack(fill="x", padx=12, pady=(0, 10))
+        self.busy, self.again, self.waiting, self.windows = False, False, None, 0
+        self.done: queue.Queue = queue.Queue()
         self.reload()
+        self.start_update()
 
     def reload(self) -> None:
-        self.status.config(text="loading ...")
-        self.root.update()
         self.sections = load_sections()
         self.rows = load_sheet(self.sections)
         self.refresh()
-        self.status.config(text="")
 
     def refresh(self) -> None:
+        keep = self.selected()
         self.items = [(ALL, f"{ALL}    {self.count(ALL)}")]
         for name in sources():
             self.items.append((name, f"{name}    {self.count(name)}"))
         self.list.delete(0, "end")
         for _, label in self.items:
             self.list.insert("end", label)
-        self.list.selection_set(0)
-        self.list.activate(0)
+        names = [n for n, _ in self.items]
+        k = names.index(keep) if keep in names else 0
+        self.list.selection_set(k)
+        self.list.activate(k)
         self.list.focus_set()
 
     def count(self, name: str) -> str:
         rows = [r for r in self.rows if (name == ALL or name in source_names(r))
                 and not only_nonsense(r)]
         if not rows:
-            return "not exported yet: Export pairs to add its lines"
+            return "new: its lines appear after the update" if self.busy else "nothing to vet"
         return f"{sum(bool(r.get('verdict')) for r in rows)}/{len(rows)} lines vetted"
 
     def selected(self) -> str | None:
-        sel = self.list.curselection()
+        sel = self.list.curselection() if hasattr(self, "items") else ()
         return self.items[sel[0]][0] if sel else None
 
-    def open(self) -> None:
-        name = self.selected()
+    # --- background update --------------------------------------------------------------------
+
+    def start_update(self) -> None:
+        if self.busy:
+            self.again = True  # one more round after this one (new verdicts came in)
+            return
+        self.busy = True
+        self.status.config(text="Updating pairs in the background ...")
+
+        def work():
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out):
+                    text = update()
+            except Exception as e:  # noqa: BLE001 (shown in the window)
+                text = f"update failed: {e}"
+            self.done.put(text)
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(300, self.poll)
+
+    def poll(self) -> None:
+        try:
+            text = self.done.get_nowait()
+        except queue.Empty:
+            self.root.after(300, self.poll)
+            return
+        self.busy = False
+        self.reload()
+        final = [l for l in text.splitlines() if l.startswith(("final:", "lines:", "update failed",
+                                                              "removed old"))]
+        self.status.config(text="Up to date. " + " ".join(l.split(" {")[0] for l in final))
+        if self.again:
+            self.again = False
+            self.start_update()
+        elif self.waiting:
+            name, self.waiting = self.waiting, None
+            self.open(name)
+
+    # --- vetting ------------------------------------------------------------------------------
+
+    def open(self, name: str | None = None) -> None:
+        name = name or self.selected()
         if not name:
+            return
+        if self.busy:  # the update writes the sheet: open the window once it is done
+            self.waiting = name
+            self.status.config(text=f"Updating pairs ... {name} opens when it is done.")
             return
         window = tk.Toplevel(self.root)
         if not open_source(window, name, self.rows, self.sections):
             window.destroy()
-            self.status.config(text="Nothing to vet here yet (Export pairs if it is new).")
+            self.status.config(text="Nothing to vet here.")
             return
-        window.protocol("WM_DELETE_WINDOW", lambda: (window.destroy(), self.refresh()))
 
-    def run(self, fn) -> None:
-        self.status.config(text="working ...")
-        self.root.update()
-        out = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out):
-                text = fn()
-        except Exception as e:  # noqa: BLE001 (shown in the window)
-            text = f"failed: {e}"
-        self.reload()
-        self.status.config(text=(text or out.getvalue()).strip())
+        self.windows += 1
 
-    def export(self) -> None:
-        name = self.selected()
-        if name:
-            self.run(lambda: export(None if name == ALL else [name]))
+        def closed():
+            window.destroy()
+            self.windows -= 1
+            self.refresh()
+            if not self.windows:  # never while a vetting window can still write the sheet
+                self.start_update()
 
-    def combine(self) -> None:
-        self.run(combine)
+        window.protocol("WM_DELETE_WINDOW", closed)
 
 
 def main() -> None:

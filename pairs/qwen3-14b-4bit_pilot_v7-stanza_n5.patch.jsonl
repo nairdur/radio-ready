@@ -1,0 +1,1 @@
+{"id": "98a93167ba4a", "source": "kidzbop", "from": ["qwen3-14b-4bit_pilot_v7-stanza_n5"], "edited": false, "artist": "Ariana Grande", "title": "7 rings", "section_header": "Verse 3", "split": "train", "model": "Qwen/Qwen3-14B", "prompt_version": "v7-stanza", "style": "stanza", "human_edited": [], "human_verdicts": {"5": "superlike"}, "diff": {"5": [[10, 11, "back,"]]}}

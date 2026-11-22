@@ -1,12 +1,16 @@
 """Synthetic pairs (explicit section -> radio edit): one vetting sheet, one pair set per source.
 
-Sources (outputs/generations/):
-  solid_*        radio_ready.rewrite runs (7B drafts, 14B for hard lines)
-  commercial_*   commercial-LLM answers (radio_ready.commercial --export); need approval and
-                 may use the Genius sections reserved for commercial evaluation
-  rhyme_*        radio_ready.rhyme_swap runs: each explicit word swapped for a clean word that
-                 rhymes with it (the end-rhyme thesaurus), the rest of the line kept; need
-                 approval
+Sources: every run in outputs/generations/ is registered on its own (no list to keep up), and
+runs of one method are one source, whatever sections or batch they cover (method()):
+  solid-v1               radio_ready.rewrite runs, solid_<input>_solid-v1 (7B drafts, 14B for
+                         hard lines); need no approval
+  free-vN, guided-vN     radio_ready.free / radio_ready.guided runs, <method>_<input>_<version>
+  rhyme-vN               radio_ready.rhyme_swap runs: each explicit word swapped for a clean
+                         word that rhymes with it, the rest of the line kept
+  commercial-<model>     commercial-LLM answers (commercial_<model>, commercial_batch_<model>);
+                         may use the Genius sections reserved for commercial evaluation
+  commercial-windows-<model>  the 3-line-window batches (commercial_window_<model>)
+  any other run          its own source (e.g. older radio_ready.generate runs)
   noise          the noise-style generations (*noise*; radio_ready.generate --style noise-*),
                  except the full-noise runs (FULL_NOISE: whole lines or stanzas turned into
                  made-up sounds, which the model copies back as gibberish). Only versions whose
@@ -26,6 +30,8 @@ the original line (radio_ready.linediff), filled in from the section records whe
   sources       the sources that proposed this rewrite, with their status (kept / dropped:
                 reason / needs approval / your version: a line you wrote while vetting a
                 proposal of that source)
+Every source but solid needs approval. Sheet rows written under a run's own name (older
+sheets) are renamed to its method when loaded; verdicts and your own lines are kept.
 Rows that only a removed source (REMOVED_SOURCES) proposed are dropped from the sheet on export.
 Rules for one version of a section (all its lines, as one source proposed them):
   - every accepted version of a line counts: the proposal when liked or superliked (or when it
@@ -55,7 +61,11 @@ Kidz Bop by song. A full pair: id, source (genius / kidzbop), artist, title, sec
 split, original, rewrite, changed, model, prompt_version, style, human_edited, human_verdicts.
 No training features are added.
 
-Run:  python -m radio_ready.pairs SOURCE [SOURCE ...]     # e.g. solid_pilot_solid-v1
+update() (--update; the vetting app runs it when it opens and after each vetting window)
+exports every source, removes the pair files of sources that no longer exist and combines.
+
+Run:  python -m radio_ready.pairs --update                 # everything (what the app does)
+      python -m radio_ready.pairs SOURCE [SOURCE ...]     # e.g. solid-v1
       python -m radio_ready.pairs --all                    # every source
       python -m radio_ready.pairs --combine                # pairs/final.*
       python -m radio_ready.pairs --rebuild
@@ -64,6 +74,7 @@ Run:  python -m radio_ready.pairs SOURCE [SOURCE ...]     # e.g. solid_pilot_sol
 import argparse
 import csv
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -121,18 +132,47 @@ def generation_path(name: str) -> Path:
     return paths.GENERATIONS_DIR / f"{name}.jsonl"  # names contain dots ("qwen2.5-...")
 
 
+METHOD = re.compile(r"(?:solid|free|guided|rhyme)_.+_((?:solid|free|guided|rhyme)-v\d+)")
+
+
+def method(stem: str) -> str:
+    """The source a run belongs to: runs of one method on other sections or in other batches
+    are one source (free_genius11-20_free-v2 -> free-v2, commercial_batch_claude ->
+    commercial-claude). Any other run is a source of its own."""
+    if stem == NOISE or stem in (FINAL, LINES):
+        return stem
+    if m := METHOD.fullmatch(stem):
+        return m.group(1)
+    if m := re.fullmatch(r"commercial_window_(\w+)", stem):
+        return f"commercial-windows-{m.group(1)}"
+    if m := re.fullmatch(r"commercial_(?:batch_)?(\w+)", stem):
+        return f"commercial-{m.group(1)}"
+    return stem
+
+
+def is_run(path: Path) -> bool:
+    """A generation run: its records have a section id and lines."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            first = json.loads(f.readline() or "{}")
+    except (OSError, ValueError):
+        return False
+    return isinstance(first, dict) and "id" in first and "lines" in first
+
+
 def sources() -> dict[str, dict]:
-    """{source name: {files, require_approval, include_reserved}}."""
-    found = {}
+    """{source name: {files, require_approval, include_reserved}}: every run, grouped by
+    method()."""
+    found: dict[str, dict] = {}
     gens = sorted(paths.GENERATIONS_DIR.glob("*.jsonl"))
     for g in gens:
         stem = g.name.removesuffix(".jsonl")
-        if stem.startswith("solid_"):
-            found[stem] = {"files": [g], "require_approval": False, "include_reserved": False}
-        elif stem.startswith("commercial_"):
-            found[stem] = {"files": [g], "require_approval": True, "include_reserved": True}
-        elif stem.startswith(("rhyme_", "free_", "guided_")):
-            found[stem] = {"files": [g], "require_approval": True, "include_reserved": False}
+        if "noise" in g.name or not is_run(g):
+            continue  # noise runs are one source below
+        spec = found.setdefault(method(stem), {
+            "files": [], "require_approval": not stem.startswith("solid_"),
+            "include_reserved": stem.startswith("commercial_")})
+        spec["files"].append(g)
     noise = [g for g in gens if "noise" in g.name and not any(f in g.name for f in FULL_NOISE)]
     if noise:
         found[NOISE] = {"files": noise, "require_approval": True, "include_reserved": False,
@@ -305,10 +345,25 @@ def split_edits(rows: list[dict]) -> int:
     return n
 
 
+def group_sources(rows: list[dict]) -> None:
+    """Rename each row's sources to their method (runs of one method are one source). When two
+    runs of a method are merged, "your version" wins, then a kept status; export resets the
+    proposal statuses anyway."""
+    rank = lambda st: (st != YOURS, st != "kept")  # noqa: E731
+    for r in rows:
+        merged: dict[str, str] = {}
+        for part in (x for x in r.get("sources", "").split("; ") if x):
+            name, _, status = part.partition(": ")
+            name = method(name)
+            if name not in merged or rank(status) < rank(merged[name]):
+                merged[name] = status
+        r["sources"] = "; ".join(sorted(f"{n}: {st}" for n, st in merged.items()))
+
+
 def load_sheet(sections) -> list[dict]:
     """The vetting sheet with text filled in. Rows of older per-export sheets that still exist
     are merged in on every load (a verdict there fills a row without one here), so vetting
-    done in an older version of the app is never lost."""
+    done in an older version of the app is never lost. Sources are grouped by method."""
     rows = read_sheet()
     by_key = {row_key(r): r for r in rows}
     for old in migrate(sections):
@@ -319,6 +374,7 @@ def load_sheet(sections) -> list[dict]:
         elif old.get("verdict") and not row.get("verdict"):
             row.update(verdict=old["verdict"], edit_diff=old.get("edit_diff", ""),
                        note=old.get("note", "") or row.get("note", ""))
+    group_sources(rows)
     fill_text(rows, lambda sid: sections[sid][1]["lines"] if sid in sections else None)
     split_edits(rows)
     return rows
@@ -663,14 +719,42 @@ def rebuild() -> str:
     return "\n".join(out)
 
 
+def remove_old_pair_files(names: set[str]) -> list[str]:
+    """Delete pairs/<name>.* of sources that are no longer sources (a run now in a group)."""
+    gone = []
+    for f in sorted(PAIRS_DIR.glob("*.patch.jsonl")):
+        name = f.name.removesuffix(".patch.jsonl")
+        if name in names or name in (FINAL, LINES):
+            continue
+        for ext in (".patch.jsonl", ".jsonl", ".md"):
+            (PAIRS_DIR / f"{name}{ext}").unlink(missing_ok=True)
+        gone.append(name)
+    return gone
+
+
+def update() -> str:
+    """Everything the vetting app needs: every source exported (new runs included), pair files
+    of sources that no longer exist removed, final and lines combined."""
+    names = list(sources())
+    text = export(names)
+    gone = remove_old_pair_files(set(names))
+    return "\n".join([text] + ([f"removed old pair files: {', '.join(gone)}"] if gone else [])
+                     + [combine()])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export, combine or rebuild synthetic pairs.")
     parser.add_argument("sources", nargs="*", help="source names (see the module docstring)")
     parser.add_argument("--all", action="store_true", help="export every source")
+    parser.add_argument("--update", action="store_true",
+                        help="export everything, drop old pair files and combine")
     parser.add_argument("--combine", action="store_true", help="write pairs/final.*")
     parser.add_argument("--rebuild", action="store_true",
                         help="full pairs from pairs/*.patch.jsonl and the section records")
     args = parser.parse_args()
+    if args.update:
+        print(update())
+        return
     if args.rebuild:
         print(rebuild())
     if args.sources or args.all:

@@ -398,15 +398,20 @@ the committed patches:
 
 ```bash
 python -m radio_ready.pairs --rebuild
-python -m radio_ready.pairs --all --combine   # export every source, then pairs/final
+python -m radio_ready.pairs --update   # every source, then pairs/final and pairs/lines
 ```
 
 ### Human vetting
 
 Double-click `vet.bat`: a start window lists every source with how many of its lines are
-vetted, plus "All sources". Vet opens one: all unvetted lines first, then a pause screen where
-you can close the window or press Enter to go on to the lines already vetted. Export pairs
-writes its pairs (new runs appear there); Combine writes `pairs/final`.
+vetted, plus "All sources". Every run in `outputs/generations` is listed by itself, and runs
+of one method are one source whatever sections or batch they cover (`solid-v1`, `free-v2`,
+`guided-v1`, `commercial-claude` for the pasted answers and batches, `commercial-windows-claude`
+for the 3-line-window batches). Vet opens one: all unvetted lines first, then a pause screen
+where you can close the window or press Enter to go on to the lines already vetted. Nothing is
+exported by hand: when the start window opens and after each vetting window closes, new runs
+are added and every source's pairs, `pairs/final` and `pairs/lines` are rebuilt in the
+background; a vetting window asked for meanwhile opens when that is done.
 
 One line at a time: the original with its explicit words highlighted and the rewrite in an
 edit field. Edit in place if needed, then Enter (like), Ctrl+Enter (superlike) or Esc (dislike);
