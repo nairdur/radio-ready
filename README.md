@@ -342,6 +342,7 @@ approval and may use the reserved commercial-evaluation sections). In `pairs/`:
 | `<source>.jsonl` | no (lyrics) | full pairs: `original`, `rewrite`, `changed`, `split`, model and prompt version; no training features |
 | `<source>.md` | no (lyrics) | side-by-side view |
 | `final.*` | patch yes | every source combined; identical pairs (same section, same rewrite) kept once |
+| `lines.*` | patch yes | one pair per line you liked or superliked (your edit if you made one), with its section as context and your `verdict` as a plain field; disliked lines never appear, and a liked line counts even when its section version is out |
 
 A version of a section becomes a pair when it passed the filters (or you approved all its
 lines), at least one line changed, nothing explicit is left, and none of its lines is disliked.
