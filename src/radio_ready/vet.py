@@ -15,10 +15,12 @@ your edit), then:
   Esc            dislike
   Up / Down      back to the previous line / skip this line (no verdict)
   Tab            context: the 4-line stanza, original and rewritten (closes on every line)
-  Alt+1 ... 8    put a suggestion in place of the explicit word: clean words that rhyme with
+  Alt+1 ... 9    put a suggestion in place of an explicit word: clean words that rhyme with
                  the explicit word itself, with its syllable count, never a sound-alike of it
-                 (radio_ready.rhymes; ranked by fit in the line and meaning; computed in the
-                 background); 1-4 for the first explicit word, 5-8 for the second
+                 (radio_ready.rhymes; scored by fit in the line and meaning, picked to differ
+                 from each other; computed in the background). Every explicit word of the
+                 line gets suggestions, numbered in order: 9 for one word, 4 each for two,
+                 3 each for three, fewer as there are more
 
 Every verdict is saved at once. Unvetted rows come first, the most distinctive rewrites before
 generic ones ("stuff", "things"): ordered by how rare the new words are in clean lyrics.
@@ -88,6 +90,14 @@ def load_sections(ids: set[str] | None = None) -> dict[str, tuple[str, dict]]:
     return found
 
 
+KEYS = 9  # Alt+1 ... Alt+9
+
+
+def per_word(n_slots: int) -> int:
+    """Suggestions per explicit word so that every word gets some within KEYS keys."""
+    return max(1, KEYS // max(1, n_slots))
+
+
 def slots(original: str, current: str, detector) -> list[dict]:
     """Where each explicit word of the original sits in the current line: the explicit word,
     the token span of current that replaces it, and trailing punctuation to keep."""
@@ -106,7 +116,7 @@ def slots(original: str, current: str, detector) -> list[dict]:
                 punct = re.search(r"[^\w']*$", b[j2 - 1] if j2 > j1 else token).group(0)
                 found.append({"word": words[0], "start": j1, "end": j2, "punct": punct})
                 break
-    return found[:2]
+    return found
 
 
 class App:
@@ -158,7 +168,7 @@ class App:
         self.edit.bind("<Tab>", lambda e: self.toggle() or "break")
         self.edit.bind("<Up>", lambda e: self.back() or "break")
         self.edit.bind("<Down>", lambda e: self.skip() or "break")
-        for n in range(1, 9):
+        for n in range(1, KEYS + 1):
             self.edit.bind(f"<Alt-Key-{n}>", lambda e, n=n: self.use_suggestion(n) or "break")
         self.show()
         self.poll()
@@ -301,12 +311,14 @@ class App:
             pos, current, found_slots, before = job
             tokens, out, err = current.split(" "), [], ""
             try:
+                k = per_word(len(found_slots))
                 for s in found_slots:
                     template = " ".join(tokens[:s["start"]] + ["<mask>" + s["punct"]]
                                         + tokens[s["end"]:])
-                    for c in suggest_for_word(template, s["word"], current, embed, k=4,
+                    for c in suggest_for_word(template, s["word"], current, embed, k=k,
                                               before=before):
                         out.append({**c, "slot": s})
+                out = out[:KEYS]
             except Exception as e:  # noqa: BLE001 (shown, never fatal)
                 err = str(e)
             self.results.put((pos, out, err))  # tkinter is only touched by the main thread

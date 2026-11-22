@@ -18,6 +18,13 @@ and sound-alikes of the explicit word (one phoneme or less apart: witch, ditch f
 Targets are the end words of the line's rhyme partners, or the original end word itself when
 it has no partner.
 
+suggest_for_word(template, explicit, ...) proposes words for the slot of one explicit word
+(the vetting app, radio_ready.rhyme_swap): words rhyming with the explicit word itself,
+perfect, slant or assonance (stressed vowel and the kind of final sound: bitch -> wish, kiss),
+never a sound-alike of it or of its last sounds (dam for goddamn), never on the Surge list or
+Kidz Bop's profanity list (never_suggest). The k returned are picked to differ from each other
+in meaning and sound (diverse(): maximal marginal relevance).
+
 Run:  python -m radio_ready.rhymes --build [--min-count 20]
       python -m radio_ready.rhymes "Been through some tough times, I should be a sad one" bitch
 """
@@ -96,6 +103,33 @@ def slant_key(phones: list[str]) -> str:
     return f"{vowel}-{'V' if last[-1:].isdigit() else last}"
 
 
+SOUND_CLASS = {**dict.fromkeys(["P", "B", "T", "D", "K", "G"], "stop"),
+               **dict.fromkeys(["CH", "JH", "F", "V", "TH", "DH", "S", "Z", "SH", "ZH", "HH"],
+                               "hiss"),
+               **dict.fromkeys(["M", "N", "NG"], "nasal"), **dict.fromkeys(["L", "R"], "liquid"),
+               **dict.fromkeys(["W", "Y"], "glide")}
+
+
+def assonance_key(phones: list[str]) -> str:
+    """Stressed vowel of the rhyme and the kind of final sound (stop, hiss, nasal, liquid):
+    bitch / wish / kiss / bridge -> IH-hiss. Looser than slant_key; for lyrics, where
+    assonance counts as a rhyme."""
+    stressed = [i for i, p in enumerate(phones) if p[-1:] in ("1", "2")]
+    vowel = re.sub(r"\d", "", phones[stressed[-1]] if stressed else phones[-1])
+    last = phones[-1]
+    return f"{vowel}-{'V' if last[-1:].isdigit() else SOUND_CLASS.get(last, last)}"
+
+
+@lru_cache(maxsize=1)
+def assonance_index() -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    for w in index()[0]:
+        phones = _phones(w)
+        if phones:
+            found.setdefault(assonance_key(phones), []).append(w)
+    return found
+
+
 def keys(word: str) -> tuple[str, str]:
     phones = _phones(word)
     return rhyme_key(word), (slant_key(phones) if phones else "")
@@ -143,8 +177,10 @@ def end_of(line: str) -> str:
     return m.group(1).lower() if m else ""
 
 
-def candidates(targets: list[str], n_syllables: int, exclude: set[str]) -> list[tuple[str, str]]:
-    """(word, 'perfect' | 'slant') rhyming with any target, within one syllable."""
+def candidates(targets: list[str], n_syllables: int, exclude: set[str],
+               loose: bool = False) -> list[tuple[str, str]]:
+    """(word, 'perfect' | 'slant' | 'assonance') rhyming with any target, within one syllable;
+    assonance (assonance_key) only when `loose`."""
     vocab, perfect, slant = index()
     found: dict[str, str] = {}
     for t in targets:
@@ -153,10 +189,33 @@ def candidates(targets: list[str], n_syllables: int, exclude: set[str]) -> list[
             found.setdefault(w, "perfect")
         for w in slant.get(sk, []) if sk else []:
             found.setdefault(w, "slant")
+        phones = _phones(t)
+        for w in assonance_index().get(assonance_key(phones), []) if loose and phones else []:
+            found.setdefault(w, "assonance")
     return [(w, kind) for w, kind in found.items()
             if w not in exclude and w not in common_words() and "'" not in w  # no possessives
-
+            and re.search("[aeiouy]", w)  # no abbreviations (mrs)
+            and w not in never_suggest()
             and abs(vocab[w]["syllables"] - n_syllables) <= 1]
+
+
+MILD = {"pissed", "pissing", "butt", "butts", "damned", "crappy", "screwed"}  # in neither list
+
+
+@lru_cache(maxsize=1)
+def never_suggest() -> frozenset[str]:
+    """Vulgar words the explicit-word detector lets through, never proposed as clean: every
+    Surge AI Obscenity List entry (any severity), the words Kidz Bop treats as profanity
+    (kidzbop_words.csv, category profanity: piss, crap, hell) and MILD."""
+    import pandas as pd
+
+    from radio_ready.explicit import surge_words
+
+    found = set(MILD) | surge_words(0)
+    if paths.KIDZBOP_WORDS_CSV.exists():
+        kb = pd.read_csv(paths.KIDZBOP_WORDS_CSV, keep_default_na=False)
+        found |= set(kb.loc[kb["category"] == "profanity", "word"].str.lower())
+    return frozenset(found)
 
 
 @lru_cache(maxsize=1)
@@ -185,6 +244,18 @@ def sounds_like(word: str, explicit: str) -> bool:
     return prev[-1] <= 1
 
 
+def part_alike(word: str, explicit: str) -> bool:
+    """Heard as part of the explicit word: inside its spelling (damn in goddamn) or at most
+    one phoneme from its last sounds (dam for goddamn)."""
+    if word in explicit:
+        return True
+    a, b = _phones(word), _phones(explicit)
+    if not a or len(b) <= len(a):
+        return False
+    strip = lambda p: [x.rstrip("012") for x in p]  # noqa: E731
+    return sum(x != y for x, y in zip(strip(a), strip(b[-len(a):]))) <= 1
+
+
 def suggest(line: str, targets: list[str], n_syllables: int, embed, k: int = 8,
             exclude: set[str] | None = None, before: str = "",
             explicit: list[str] | None = None) -> list[dict]:
@@ -209,15 +280,44 @@ def suggest(line: str, targets: list[str], n_syllables: int, embed, k: int = 8,
              "score": round(float(score[i]), 2)} for i in order[:k]]
 
 
+KIND_BONUS = {"perfect": 0.3, "slant": 0.0, "assonance": -0.3}
+DIVERSITY = 3.0  # weight of the closeness to words already picked (diverse())
+SAME_RHYME = 0.4  # added closeness for two words with the same rhyming part (pinch / cinch)
+
+
+def diverse(words: list[str], score: np.ndarray, embed, k: int, pool: int = 30) -> list[int]:
+    """k indexes, best first, as different from each other as possible (maximal marginal
+    relevance): each pick maximizes its score minus DIVERSITY x its closeness to the words
+    already picked (cosine of the word embeddings, + SAME_RHYME when the rhyming part is the
+    same). Only the `pool` best-scored words are considered, so every pick still fits."""
+    order = [int(i) for i in np.argsort(-score)[:pool]]
+    if len(order) <= 1:
+        return order[:k]
+    vecs = embed([words[i] for i in order])
+    close = vecs @ vecs.T
+    keys = [rhyme_key(words[i]) for i in order]
+    close = close + SAME_RHYME * np.array([[a == b for b in keys] for a in keys])
+    rel = score[order]
+    picked = [0]
+    while len(picked) < min(k, len(order)):
+        rest = [j for j in range(len(order)) if j not in picked]
+        gain = [rel[j] - DIVERSITY * max(close[j, p] for p in picked) for j in rest]
+        picked.append(rest[int(np.argmax(gain))])
+    return [order[j] for j in picked]
+
+
 def suggest_for_word(template: str, explicit: str, reference: str, embed, k: int = 4,
-                     before: str = "") -> list[dict]:
+                     before: str = "", varied: bool = True) -> list[dict]:
     """Clean words for the slot `<mask>` in `template` that rhyme with the explicit word they
     replace (bitch -> rich, switch), with its syllable count (within one), never a sound-alike
-    of it. Ranked by masked-LM fit in the slot and by how close the filled line stays in
-    meaning to `reference` (the current rewrite). Returns {word, kind, line, fit, ...}."""
+    of it or of its last sounds (dam for goddamn). Scored by masked-LM fit in the slot and by how close the filled line stays in
+    meaning to `reference` (the current rewrite). `varied` (default) also takes assonance
+    rhymes (bitch -> wish, kiss, bridge; scored a little lower) and returns the k picked by
+    diverse() instead of the k best. Returns {word, kind, line, fit, ...}."""
     exclude = set(WORD.findall(template.lower().replace("<mask>", " "))) | {explicit.lower()}
-    found = [(w, kind) for w, kind in candidates([explicit], word_syllables(explicit), exclude)
-             if not sounds_like(w, explicit)]
+    found = [(w, kind) for w, kind in candidates([explicit], word_syllables(explicit), exclude,
+                                                 loose=varied)
+             if not sounds_like(w, explicit) and not part_alike(w, explicit)]
     if not found:
         return []
     texts = [template.replace("<mask>", w) for w, _ in found]
@@ -225,11 +325,12 @@ def suggest_for_word(template: str, explicit: str, reference: str, embed, k: int
     sims = vecs[1:] @ vecs[0]
     fit = slot_fit().score(f"{before}\n{template}".strip(), [w for w, _ in found])
     z = lambda x: (x - x.mean()) / (x.std() + 1e-6) if len(x) > 1 else x * 0  # noqa: E731
-    score = z(fit) + z(sims) + np.array([0.3 if kind == "perfect" else 0 for _, kind in found])
-    order = np.argsort(-score)
+    score = z(fit) + z(sims) + np.array([KIND_BONUS[kind] for _, kind in found])
+    order = (diverse([w for w, _ in found], score, embed, k) if varied
+             else [int(i) for i in np.argsort(-score)[:k]])
     return [{"word": found[i][0], "kind": found[i][1], "line": texts[i],
              "fit": round(float(fit[i]), 2), "similarity": round(float(sims[i]), 3),
-             "score": round(float(score[i]), 2)} for i in order[:k]]
+             "score": round(float(score[i]), 2)} for i in order]
 
 
 def main() -> None:

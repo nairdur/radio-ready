@@ -333,27 +333,26 @@ against the draft and on syllables and end rhyme against the original.
 python -m radio_ready.rewrite [--input FILE] [--limit N]    # pilot by default
 ```
 
-`rhyme_swap.py`: no LLM rewrite. Every explicit word is swapped for a clean word from the
-end-rhyme thesaurus (`rhymes.py`, as in the vetting app's Alt+n suggestions): a word that rhymes
-with the explicit word itself, with its syllable count (within one), never a sound-alike of it
-or of its last sounds (no "dam" for "goddamn"). The rest of the line stays as written. The top 4
-words per explicit word (every combination when a line has two) are scored like `generate.py`
-(filters, CoLA fluency relative to the original) and the best is kept: similarity + 0.05 x
-masked-LM slot fit - fluency lost. The slot fit keeps the part of speech; similarity alone
-prefers words close in meaning to the explicit word but of the wrong kind ("money ain't
-exist"). `--cleanup` also lets Qwen2.5-7B (4-bit, about 5.5 GB of GPU memory) fix the grammar
-or a word or two around the new word, keeping it; those versions compete in the same ranking.
+`rhyme_swap.py`: swap, then reword. Every explicit word of the line is first swapped for a
+clean word from the end-rhyme thesaurus (`rhymes.py`, the vetting app's Alt+n suggestions): 6
+varied words per explicit word that rhyme with it, with its syllable count (within one). The
+words of all explicit words are combined (up to 64 lines: 6 x 6 for two words, 4 x 4 x 4 for
+three, ...). The swaps are ranked without a model: the `generate.py` filters, then similarity +
+0.05 x masked-LM slot fit - CoLA fluency lost (the slot fit keeps the part of speech). A bare
+swap rarely makes sense ("Been through some bad exist"), so Qwen2.5-7B (4-bit, about 5.5 GB of
+GPU memory; always on) rewords 4 of them, the best first and then those whose words the others
+do not use: it sees the original line, the
+swapped line and two lines around it as plain text (no syllable counts or rhyme letters) and
+changes the words around the new word so the line makes sense and keeps its meaning, keeping
+the new word, the end rhyme and about the same syllables. An answer counts only if it keeps the
+new word, the end rhyme (rhymes with the original, or keeps the swapped end word) and is within
+2 syllables of the original. The best answer that passes the filters wins; bare swaps are never
+used as rewrites.
 
 ```bash
-python -m radio_ready.rhyme_swap [--input FILE] [--limit N] [--k 4] [--cleanup]
-# -> outputs/generations/rhyme_<input>_rhyme-v1[-cleanup].jsonl, source rhyme_<input>_<version>
+python -m radio_ready.rhyme_swap [--input FILE] [--limit N] [--k 6] [--drafts 4]
+# -> outputs/generations/rhyme_<input>_rhyme-v2.jsonl, source rhyme_<input>_rhyme-v2
 ```
-
-On the Kidz Bop pilot (50 sections, 67 lines with an explicit word, CPU only, about 1 s a
-section) 66 lines got a substitution. 55 of them pass the filters and lose at most 0.3 of CoLA
-acceptability. Reading them, about half make sense ("full of spirit", "go running crazy",
-"started this list", "six of my kids"). The rest have the wrong kind of word ("talking that
-minute", "We don't amok with lies"), so every line needs your approval.
 
 `pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the rhyme swaps
 (`rhyme_*`; they need your approval), the commercial models (`commercial_*`, from
@@ -386,10 +385,14 @@ there); Combine writes `pairs/final`.
 One line at a time: the original with its explicit words highlighted and the rewrite in an
 edit field. Edit in place if needed, then Enter (like), Ctrl+Enter (superlike) or Esc (dislike);
 Up/Down go back or skip; Tab shows the 4-line stanza, original and rewritten (it closes on
-every new line). Alt+1-8 puts a suggestion in place of the explicit word: clean words that
-rhyme with the explicit word itself, with its syllable count, never a sound-alike of it
-(`rhymes.py`: CMU rhymes of words common in clean lyrics, ranked by masked-LM fit in the slot
-and meaning; `python -m radio_ready.rhymes --build` once). Distinctive rewrites come first,
+every new line). Alt+1-9 puts a suggestion in place of an explicit word: clean words that
+rhyme with the explicit word itself (perfect, slant or assonance: bitch -> cinch, kids, wish),
+with its syllable count, never a sound-alike of it or of its last sounds, never a word on the
+Surge list or Kidz Bop's profanity list (piss, crap) (`rhymes.py`: CMU rhymes of words common
+in clean lyrics, scored by masked-LM fit in the slot and meaning, then picked to differ from
+each other in meaning and sound; `python -m radio_ready.rhymes --build` once). Every explicit
+word of the line gets suggestions, numbered in order: 9 for one word, 4 each for two, 3 each
+for three, fewer as there are more. Distinctive rewrites come first,
 generic ones ("stuff", "things") last.
 
 All verdicts go to one sheet, `annotations/vetting.csv` (committed, no lyrics: rewrites and
