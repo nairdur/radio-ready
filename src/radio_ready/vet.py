@@ -20,19 +20,29 @@ is never replaced), and another list shows the proposal, not your version. Then:
   Esc            dislike
   Up / Down      back to the previous line / skip this line (no verdict)
   Tab            context: the 4-line stanza, original and rewritten (closes on every line)
-  Alt+1 ... 9    put a suggestion in place of an explicit word: clean words that rhyme with
+  Alt+1 ... 9    (Cmd+1 ... 9 on a Mac) put a suggestion in place of an explicit word: clean words that rhyme with
                  the explicit word itself, with its syllable count, never a sound-alike of it
                  (radio_ready.rhymes; scored by fit in the line and meaning, picked to differ
                  from each other; computed in the background). Every explicit word of the
                  line gets suggestions, numbered in order: 9 for one word, 4 each for two,
                  3 each for three, fewer as there are more
 
+The "human" list holds the lines that keep a section from being paired: the section has accepted
+lines, but this one has no accepted version in any source and no proposal waiting for your
+verdict (it was disliked, or no model rewrote it). Write a clean version (Alt+1-9 for rhymes)
+and press Enter or Ctrl+Enter; Esc skips. Finished sections are the pairs of the human source
+(radio_ready.pairs.export_human).
+
+Repeated lines of a section are vetted once: a line is not asked when another occurrence of
+it already has an accepted version, or when the same rewrite of it is already asked (pairs
+use one version for every occurrence).
+
 Every verdict is saved at once. All unvetted lines come first, the most distinctive rewrites
 before generic ones ("stuff", "things"; ordered by how rare the new words are in clean lyrics).
 Then a pause screen: close the window, or press Enter to go on to the lines already vetted
 (same order), to review or change them.
 
-Run:  vet.bat                                   # start window
+Run:  vet.bat (Windows) or vet.command (Mac)    # start window
       python -m radio_ready.vet [SOURCE]
 """
 
@@ -44,6 +54,7 @@ import json
 import math
 import queue
 import re
+import sys
 import threading
 import tkinter as tk
 from collections import Counter
@@ -52,8 +63,9 @@ from tkinter import font as tkfont
 from radio_ready import paths
 from radio_ready.explicit import ExplicitDetector
 from radio_ready.pairs import (
-    SECTION_FILES, add_your_version, load_sheet, only_nonsense, source_names, sources, update,
-    write_sheet,
+    APPROVE, HUMAN, HUMAN_REQUEST, SECTION_FILES, YOURS, add_your_version, line_key, load_sheet, only_nonsense,
+    source_names,
+    sources, update, write_sheet,
 )
 from radio_ready.text import syllables
 
@@ -97,7 +109,9 @@ def load_sections(ids: set[str] | None = None) -> dict[str, tuple[str, dict]]:
     return found
 
 
-KEYS = 9  # Alt+1 ... Alt+9
+KEYS = 9  # Alt+1 ... Alt+9 (Cmd+1 ... Cmd+9 on a Mac, where Option+digit types a character)
+MAC = sys.platform == "darwin"
+SUGGEST_KEY = "Cmd" if MAC else "Alt"
 
 
 def per_word(n_slots: int) -> int:
@@ -134,6 +148,7 @@ class App:
         self.paused, self.past_pause = False, False
         self.sections, self.detector, self.source = sections, detector, title
         self.pos, self.history, self.context = 0, [], False
+        self.drafts: dict[int, str] = {}  # row index -> text typed but not voted on
         self.suggestions, self.results, self.pending, self.slots = [], queue.Queue(), None, []
         base = tkfont.nametofont("TkDefaultFont").actual()["family"]
         big = (base, 15)
@@ -174,12 +189,15 @@ class App:
         self.status.pack(fill="x", padx=12)
         self.edit.bind("<Return>", lambda e: self.vote("like") or "break")
         self.edit.bind("<Control-Return>", lambda e: self.vote("superlike") or "break")
+        if MAC:
+            self.edit.bind("<Command-Return>", lambda e: self.vote("superlike") or "break")
         root.bind("<Escape>", lambda e: self.vote("dislike"))
         self.edit.bind("<Tab>", lambda e: self.toggle() or "break")
         self.edit.bind("<Up>", lambda e: self.back() or "break")
         self.edit.bind("<Down>", lambda e: self.skip() or "break")
         for n in range(1, KEYS + 1):
-            self.edit.bind(f"<Alt-Key-{n}>", lambda e, n=n: self.use_suggestion(n) or "break")
+            self.edit.bind(f"<{'Command' if MAC else 'Alt'}-Key-{n}>",
+                           lambda e, n=n: self.use_suggestion(n) or "break")
         self.show()
         self.poll()
 
@@ -194,6 +212,23 @@ class App:
     def proposed(self, row: dict) -> str:
         """The line as the row proposes it (never an edit you made in another list)."""
         return row.get("rewrite", "") or row["original"]
+
+    def yours(self, row: dict) -> str:
+        """Your latest saved version of this line for this list ("" if none)."""
+        names = source_names(row) if self.source == ALL else {self.source}
+        found = [r for r in self.rows if r is not row and r["id"] == row["id"]
+                 and r["line"] == row["line"] and r.get("rewrite")
+                 and any(f"{n}: {YOURS}" in r.get("sources", "") for n in names)]
+        return found[-1]["rewrite"] if found else (row.get("edit") or "").strip()
+
+    def keep_draft(self) -> None:
+        """Remember text typed on the current line but not voted on."""
+        if self.paused or self.pos >= len(self.order):
+            return
+        text = self.edit.get("1.0", "end").strip()
+        r = self.row()
+        if text and text not in (self.proposed(r), self.yours(r)):
+            self.drafts[self.order[self.pos]] = text
 
     def blank(self, message: str) -> None:
         self.header.config(text=message)
@@ -232,7 +267,8 @@ class App:
                 self.orig.tag_add("explicit", f"1.0+{m.start()}c", f"1.0+{m.end()}c")
         self.orig.config(state="disabled")
         self.edit.delete("1.0", "end")
-        self.edit.insert("1.0", self.proposed(r))
+        self.edit.insert("1.0", self.drafts.get(self.order[self.pos]) or self.yours(r)
+                         or self.proposed(r))
         self.edit.focus_set()
         self.edit.mark_set("insert", "end-1c")
         self.context = False  # context closes on every line
@@ -282,6 +318,14 @@ class App:
             return
         r = self.row()
         text = self.edit.get("1.0", "end").strip()
+        if self.source == HUMAN:
+            if verdict == "dislike":  # nothing to dislike here: Esc skips the line
+                self.skip()
+                return
+            if not text or text == r["original"] or self.detector.find(text):
+                self.status.config(text="write a clean version of the line first "
+                                        f"({SUGGEST_KEY}+1-9 for rhymes), then Enter")
+                return
         if verdict != "dislike" and text and text != self.proposed(r):
             # your own version: a row of its own for this list; the proposal keeps its verdict
             names = source_names(r) if self.source == ALL else {self.source}
@@ -299,6 +343,7 @@ class App:
             self.status.config(text=f"saved: {saved}")
         except PermissionError:
             self.status.config(text="could not save: close the sheet in Excel (kept in memory)")
+        self.drafts.pop(self.order[self.pos], None)
         self.history.append(self.pos)
         self.pos += 1
         self.show()
@@ -309,6 +354,7 @@ class App:
 
     def back(self) -> None:
         if self.history:
+            self.keep_draft()
             self.pos = self.history.pop()
             if self.pos < self.boundary:
                 self.past_pause = False
@@ -319,6 +365,7 @@ class App:
             self.go_on()
             return
         if self.pos < len(self.order):
+            self.keep_draft()
             self.history.append(self.pos)
             self.pos += 1
             self.show()
@@ -386,7 +433,7 @@ class App:
                     groups: dict[str, list[str]] = {}
                     for n, s in enumerate(found, start=1):
                         groups.setdefault(s["slot"]["word"], []).append(f"{n}={s['word']}")
-                    self.rhymes.config(text="Alt+n:   " + "      ".join(
+                    self.rhymes.config(text=f"{SUGGEST_KEY}+n:   " + "      ".join(
                         f"{w}: " + "  ".join(v) for w, v in groups.items()))
         self.root.after(100, self.poll)
 
@@ -408,6 +455,27 @@ def open_source(window, name: str, rows, sections) -> bool:
     after a pause screen, the lines already vetted."""
     mine = [k for k, r in enumerate(rows) if name == ALL or name in source_names(r)]
     unvetted = [k for k in mine if not rows[k].get("verdict") and not only_nonsense(rows[k])]
+    if name == HUMAN:  # lines to write: asked until you have an accepted version of them
+        written = {(r["id"], r["line"]) for r in rows
+                   if f"{HUMAN}: {YOURS}" in r.get("sources", "")
+                   and r.get("verdict", "").strip().lower() in APPROVE}
+        unvetted = [k for k in mine if f"{HUMAN}: {HUMAN_REQUEST}" in rows[k].get("sources", "")
+                    and (rows[k]["id"], rows[k]["line"]) not in written]
+    # Repeated lines of a section share their versions (radio_ready.pairs.share_repeats): skip
+    # a line when another occurrence of it already has an accepted version, or when the same
+    # rewrite of it is already in the queue.
+    accepted = {(r["id"], line_key(r.get("original", ""))) for r in rows
+                if r.get("verdict", "").strip().lower() in APPROVE}
+    queued, kept = set(), []
+    for k in sorted(unvetted, key=lambda k: (rows[k]["id"], int(rows[k]["line"]))):
+        r = rows[k]
+        group = (r["id"], line_key(r.get("original", "")))
+        text = (r.get("edit") or "").strip() or r.get("rewrite", "")
+        if group in accepted or (group, text) in queued:
+            continue
+        queued.add((group, text))
+        kept.append(k)
+    unvetted = kept
     vetted = [k for k in mine if rows[k].get("verdict")]
     if not unvetted and not vetted:
         return False
@@ -456,7 +524,12 @@ class Launcher:
     def refresh(self) -> None:
         keep = self.selected()
         self.items = [(ALL, f"{ALL}    {self.count(ALL)}")]
-        for name in sources():
+        self.items.append((HUMAN, f"{HUMAN} (finish sections yourself)    {self.count(HUMAN)}"))
+        # sources with runs on this machine, then those known only from the shared sheet
+        # (outputs/ is not shared: a teammate vets every proposal through the sheet)
+        names = list(sources())
+        names += sorted({n for r in self.rows for n in source_names(r)} - set(names) - {HUMAN})
+        for name in names:
             self.items.append((name, f"{name}    {self.count(name)}"))
         self.list.delete(0, "end")
         for _, label in self.items:
@@ -468,6 +541,13 @@ class Launcher:
         self.list.focus_set()
 
     def count(self, name: str) -> str:
+        if name == HUMAN:
+            asked = {(r["id"], r["line"]) for r in self.rows
+                     if f"{HUMAN}: {HUMAN_REQUEST}" in r.get("sources", "")}
+            done = {(r["id"], r["line"]) for r in self.rows
+                    if f"{HUMAN}: {YOURS}" in r.get("sources", "")
+                    and r.get("verdict", "").strip().lower() in APPROVE} & asked
+            return f"{len(done)}/{len(asked)} lines written" if asked else "nothing to finish"
         rows = [r for r in self.rows if (name == ALL or name in source_names(r))
                 and not only_nonsense(r)]
         if not rows:

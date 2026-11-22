@@ -8,6 +8,8 @@ Steps, in order:
   kidzbop          Kidz Bop song sections and word statistics
   genius           Genius sections
   aae              AAE proportion for Genius sections
+  rhyme_vocab      rhyme thesaurus for the vetting app's suggestions (radio_ready.rhymes
+                   --build; CPU)
   commercial       add new sections to the commercial-LLM copy-paste table (never edits
                    filled cells)
   noise            (only with --with-noise) noise-style rewrites of the Kidz Bop pilot:
@@ -20,7 +22,7 @@ Steps, in order:
                    committed patches and the section records: the vetted pairs, reconstructed
                    without rerunning any model
 
-New noise or rhyme runs show up as sources in the vetting app (vet.bat: Export pairs).
+New noise or rhyme runs show up as sources in the vetting app (vet.bat / vet.command).
 Each step runs as `python -m radio_ready.<step>` and the run stops at the first failure.
 
 Run:  python -m radio_ready.pipeline                       # data, then the pairs rebuilt
@@ -36,9 +38,9 @@ import sys
 import time
 
 STEPS = ["download", "labels", "learned_lexicon", "classifier", "kidzbop", "genius", "aae",
-         "commercial", "noise", "rhyme", "pairs"]
-MODULES = {"noise": "generate", "rhyme": "rhyme_swap"}
-STEP_ARGS = {"download": ["all"], "pairs": ["--rebuild"],
+         "rhyme_vocab", "commercial", "noise", "rhyme", "pairs"]
+MODULES = {"noise": "generate", "rhyme": "rhyme_swap", "rhyme_vocab": "rhymes"}
+STEP_ARGS = {"download": ["all"], "pairs": ["--rebuild"], "rhyme_vocab": ["--build"],
              "noise": ["--style", "noise-vowels", "--samples", "5"]}
 OPTIONAL = {"classifier": "with_classifier", "noise": "with_noise", "rhyme": "with_rhyme"}
 

@@ -33,3 +33,8 @@ COMPARISON_DIR = OUTPUTS / "comparison"
 
 # Commercial-LLM rewrites: never overwritten by the pipeline
 COMMERCIAL_DIR = DATA / "commercial"
+
+# Training data
+PARADEHATE_PARQUET = RAW / "paradehate" / "data" / "train-00000-of-00001.parquet"
+PARADEHATE_PAIRS = PROCESSED / "paradehate" / "pairs.jsonl"
+SFT_DIR = PROCESSED / "sft"

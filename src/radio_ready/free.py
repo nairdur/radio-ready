@@ -18,11 +18,17 @@ original line) x fluency (CoLA, relative to the original). Lines with no clean r
 --retries new calls, the block shown with the rewrites already accepted. A line with no
 clean rewrite after that gets no proposal: an explicit line is never proposed.
 
---version 2 (default) also names the stock swaps of the vetting sheet (generic replacements
+--version 2 also names the stock swaps of the vetting sheet (generic replacements
 used 5+ times for an explicit word: shit -> stuff, bitch -> girl, fuck -> mess, ...) and asks
 for a creative rewrite of the phrase instead; rewrites that bring in one of them rank below
 those that do not, and the style examples are liked edits without one. --version 1 is the
 first prompt.
+
+--version 3 (default) mines the stock swaps automatically instead (stock_table): every replacement of an
+explicit word in every generation run, the vetting sheet, the Kidz Bop substitutions and the
+official clean versions, counted per explicit word. The prompt names the stock swaps of the
+words flagged in the block; a rewrite that brings in a stock swap of its line's explicit word,
+or one generic everywhere, ranks below those that do not.
 
 Output: outputs/generations/free_<input>_<VERSION>.jsonl in the radio_ready.generate format;
 the vetting app lists it as its own source.
@@ -48,7 +54,7 @@ from radio_ready.rewrite import load, rhyme_instruction, unload
 from radio_ready.scoring import TOXICITY_THRESHOLD, Fluency, Similarity, Toxicity
 from radio_ready.text import end_rhyme_kept, syllables
 
-VERSIONS = {1: "free-v1", 2: "free-v2"}
+VERSIONS = {1: "free-v1", 2: "free-v2", 3: "free-v3"}
 MODEL = "Qwen/Qwen2.5-7B-Instruct"
 N_EXAMPLES = 6
 
@@ -128,6 +134,115 @@ def generic_in(new: str, original: str) -> list[str]:
             and w.lower() in set(generic_words())]
 
 
+# ---- v3: stock swaps mined automatically, per explicit word ---------------------------------
+# Every replacement of an explicit word is counted, from every candidate of every generation
+# run (vetted or not), every proposal and edit in the vetting sheet, the Kidz Bop substitutions
+# and the official clean versions. A single-word replacement used for STOCK_MIN_LINES or more
+# different lines of one explicit word (inflections merged: fuckin, fucked -> fuck) is a stock
+# swap of that word; one that is a stock swap of GLOBAL_MIN_WORDS or more explicit words is
+# generic for every line.
+
+STOCK_MIN_LINES = 3
+GLOBAL_MIN_WORDS = 3
+STOCK_IN_PROMPT = 8
+
+
+def explicit_key(word: str) -> str:
+    w = word.lower().strip("'")
+    base = re.sub(r"(?:in'|ing|in|ed|ers|er|es|s)$", "", w)
+    return base if len(base) >= 3 else w
+
+
+def _observations(detector):
+    """(line key, explicit word, replacement) for every observed replacement."""
+    from radio_ready.pairs import load_sections
+
+    sections = load_sections()
+    for r in sheet_rows():
+        new = (r.get("edit") or "").strip() or r.get("rewrite", "")
+        if new:
+            yield (r["id"], r.get("line")), r["original"], new
+    for path in sorted(paths.GENERATIONS_DIR.glob("*.jsonl")):
+        for rec in map(json.loads, open(path, encoding="utf-8")):
+            found = sections.get(rec.get("id"))
+            if not found:
+                continue
+            orig = found[1]["lines"]
+            for u in rec.get("units") or []:
+                start, end = u.get("start", 0), u.get("end", 0)
+                for c in u.get("candidates") or []:
+                    if c.get("line"):
+                        yield (rec["id"], start), orig[start], c["line"]
+                    for k, text in enumerate(c.get("lines") or []):
+                        if start + k < min(end, len(orig)) and text:
+                            yield (rec["id"], start + k), orig[start + k], text
+    kb = paths.KIDZBOP_SUBSTITUTIONS_CSV
+    if kb.exists():
+        import csv
+        for row in csv.DictReader(open(kb, encoding="utf-8")):
+            for n in range(int(row["count"])):
+                yield ("kidzbop", row["badword"], n), row["badword"], row["replacement"]
+    clean = paths.PROCESSED / "genius_clean" / "lines.jsonl"
+    if clean.exists():
+        for rec in map(json.loads, open(clean, encoding="utf-8")):
+            if rec.get("kind") == "rewritten":
+                yield ("clean", rec["id"]), rec["original"], rec["clean"]
+
+
+@lru_cache(maxsize=1)
+def stock_table() -> tuple[dict[str, list[str]], frozenset[str]]:
+    """{explicit word key: stock swaps, most used first}, and the words generic everywhere."""
+    detector = ExplicitDetector()
+    lines_by: dict[tuple[str, str], set] = {}
+    for key, original, new in _observations(detector):
+        for src, dst in swaps(original, new, detector):
+            dst = dst.strip()
+            if (len(dst.split()) != 1 or not dst or dst in STOP or detector.find(dst)
+                    or not WORD.fullmatch(dst)):
+                continue
+            for e in detector.find(src):
+                lines_by.setdefault((explicit_key(e), dst), set()).add((key, dst))
+    per_word: dict[str, list[tuple[int, str]]] = {}
+    for (e, dst), seen in lines_by.items():
+        if len(seen) >= STOCK_MIN_LINES:
+            per_word.setdefault(e, []).append((len(seen), dst))
+    stock = {e: [w for _, w in sorted(ws, reverse=True)] for e, ws in per_word.items()}
+    spread = Counter(w for ws in stock.values() for w in ws)
+    everywhere = frozenset({w for w, n in spread.items() if n >= GLOBAL_MIN_WORDS}
+                           | set(generic_words()))
+    return stock, everywhere
+
+
+def stock_for(original: str, detector) -> set[str]:
+    stock, everywhere = stock_table()
+    out = set(everywhere)
+    for e in detector.find(original):
+        out |= set(stock.get(explicit_key(e), []))
+    return out
+
+
+def generic_v3(new: str, original: str, detector) -> list[str]:
+    """Stock swaps (for this line's explicit words, or generic everywhere) the rewrite brings in."""
+    have = {w.lower() for w in WORD.findall(original)}
+    stock = stock_for(original, detector)
+    return [w for w in WORD.findall(new) if w.lower() not in have and w.lower() in stock]
+
+
+CREATIVE_V3 = """Do not just swap a censored word for a stock substitute: those make every radio edit sound the same. Stock substitutes to avoid here: {generic}. Rework the phrase around the censored word with fresh words or an image that fits this verse, the way the artist could have written it clean.
+"""
+
+
+def creative_v3(censored: list[str]) -> str:
+    stock, _ = stock_table()
+    parts = []
+    for e in sorted({explicit_key(w) for w in censored}):
+        ws = stock.get(e, [])[:STOCK_IN_PROMPT]
+        if ws:
+            parts.append(f'"{e}" -> ' + ", ".join(ws))
+    return CREATIVE_V3.format(generic="; ".join(parts) or ", ".join(
+        f'"{w}"' for w in generic_words()[:12]))
+
+
 def examples(exclude_ids: set[str], k: int = N_EXAMPLES,
              creative: bool = False) -> list[tuple[str, str]]:
     """Up to k (original, edit) line pairs you liked, your own edits first, one per song;
@@ -137,12 +252,13 @@ def examples(exclude_ids: set[str], k: int = N_EXAMPLES,
     edited = [r for r in rows if (r.get("edit") or "").strip()]
     plain = [r for r in rows if not (r.get("edit") or "").strip() and r.get("rewrite")
              and r.get("verdict") == "superlike"]
-    out, seen = [], set()
+    out, seen, detector = [], set(), ExplicitDetector()
     for r in edited + plain:
         new = (r.get("edit") or "").strip() or r["rewrite"]
         if r["id"] in seen or new == r["original"]:
             continue
-        if creative and generic_in(new, r["original"]):
+        if creative and (generic_in(new, r["original"])
+                         or generic_v3(new, r["original"], detector)):
             continue
         seen.add(r["id"])
         out.append((r["original"], new))
@@ -239,7 +355,8 @@ class Scorer:
                  "rhymes": end_rhyme_kept(old[n], new[n]),
                  "fluency_drop": round(max(float(flu[n] - flu[len(old) + n]), 0.0), 3),
                  "non_words": non_words(new[n], old[n]), "unchanged": new[n] == old[n],
-                 "generic": generic_in(new[n], old[n])}
+                 "generic": generic_in(new[n], old[n]),
+                 "generic_v3": generic_v3(new[n], old[n], self.detector)}
             c["ok"] = bool(not c["explicit"] and c["toxicity"] < TOXICITY_THRESHOLD
                            and not c["non_words"] and not c["unchanged"])
             out.append(c)
@@ -247,7 +364,10 @@ class Scorer:
 
 
 def rank(c: dict, version: int = 2) -> tuple:
-    generic = bool(c.get("generic")) if version >= 2 else False
+    if version >= 3:
+        generic = bool(c.get("generic_v3"))
+    else:
+        generic = bool(c.get("generic")) if version >= 2 else False
     return (not c["ok"], generic, c["syllable_diff"] > 1, not c["rhymes"],
             -c["similarity"] * (1 - c["fluency_drop"]))
 
@@ -263,8 +383,10 @@ def ask(tok, model, scorer, record, lines, start, todo, shot_text, samples, atte
     shown, notes = block_text(lines, start, targets, record, detector)
     user = PROMPT.format(title=record["title"], artist=record["artist"], block=shown,
                          flagged=notes, examples=shot_text,
-                         creative=CREATIVE.format(generic=", ".join(
-                             f'"{w}"' for w in generic_words()[:12])) if version >= 2 else "")
+                         creative=(creative_v3([w for i in todo for w in targets[i]])
+                                   if version >= 3 else CREATIVE.format(generic=", ".join(
+                                       f'"{w}"' for w in generic_words()[:12]))
+                                   if version >= 2 else ""))
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
     raws = complete(tok, model, msgs, 1, 256, 0.0, 1.0, False)
     if samples:
@@ -287,7 +409,7 @@ def main() -> None:
     parser.add_argument("--input", default=str(paths.GENIUS_SECTIONS_JSONL))
     parser.add_argument("--offset", type=int, default=0, help="skip the first N sections")
     parser.add_argument("--limit", type=int, default=10)
-    parser.add_argument("--version", type=int, choices=sorted(VERSIONS), default=2)
+    parser.add_argument("--version", type=int, choices=sorted(VERSIONS), default=3)
     parser.add_argument("--name", default=None)
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--samples", type=int, default=4)

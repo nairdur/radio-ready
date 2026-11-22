@@ -61,3 +61,6 @@ pairs/*.jsonl
 pairs/*.md
 !pairs/*.patch.jsonl
 pairs/*.pdf
+
+# Course report drafts (private)
+report/

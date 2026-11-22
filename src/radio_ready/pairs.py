@@ -38,6 +38,10 @@ Rules for one version of a section (all its lines, as one source proposed them):
     passed, the source needs no approval and you have not vetted it) and each of your own versions
     of it that you liked or superliked. Each one is in a pair of its own: the first accepted
     version of every line, plus one pair per further version of a line;
+  - repeated lines (the same explicit line more than once in a section, case and punctuation
+    ignored) share their versions: a version accepted for any occurrence is a version of
+    all of them, and every pair uses one version for all occurrences (the first accepted
+    one; each further accepted version is a complete-section pair of its own);
   - a line with no accepted version leaves the section out when it was disliked, or when the
     source needs approval or the filters dropped it;
   - nothing explicit may be left.
@@ -491,26 +495,58 @@ def alternatives(row: dict, verdict: str, proposed: str, auto: bool, yours: list
     return out
 
 
+def line_key(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]", " ", text.lower()).split())
+
+
+def repeat_groups(lines: list[str], todo: list[int]) -> list[list[int]]:
+    """The lines of `todo` grouped by text (case and punctuation ignored), in line order."""
+    groups: dict[str, list[int]] = {}
+    for i in todo:
+        groups.setdefault(line_key(lines[i]), []).append(i)
+    return sorted(groups.values())
+
+
+def share_repeats(alts: dict[int, list[tuple[str, bool, str]]], groups: list[list[int]]) -> None:
+    """Repeated lines share their accepted versions: a version accepted for any occurrence is
+    a version of every occurrence (in line order, duplicates kept once)."""
+    for g in groups:
+        if len(g) > 1:
+            merged, seen = [], set()
+            for i in g:
+                for alt in alts.get(i, []):
+                    if alt[0] not in seen:
+                        seen.add(alt[0])
+                        merged.append(alt)
+            for i in g:
+                alts[i] = list(merged)
+
+
 def versions(lines: list[str], alts: dict[int, list[tuple[str, bool, str]]],
-             verdicts: dict[str, str]):
+             verdicts: dict[str, str], groups: list[list[int]] | None = None):
     """(section lines, lines you wrote, verdicts of the lines used) for every accepted version:
     the first alternative of each line, then one more version for each further alternative of
-    a line (the other lines as in the first). Every liked line is thus in a pair of its own."""
+    a line (the other lines as in the first). Every liked line is thus in a pair of its own.
+    A group of repeated lines always takes one version for all its lines."""
+    groups = groups or [[i] for i in alts]
     base, mine, used = list(lines), set(), dict(verdicts)
-    for i, found in alts.items():
+    for g in groups:
+        found = alts.get(g[0])
         if found:
-            base[i] = found[0][0]
-            if found[0][1]:
-                mine.add(i)
-            if found[0][2]:
-                used[str(i)] = found[0][2]
+            for i in g:
+                base[i] = found[0][0]
+                if found[0][1]:
+                    mine.add(i)
+                if found[0][2]:
+                    used[str(i)] = found[0][2]
     yield base, sorted(mine), used
-    for i, found in alts.items():
-        for text, by_you, verdict in found[1:]:
+    for g in groups:
+        for text, by_you, verdict in alts.get(g[0], [])[1:]:
             v = list(base)
-            v[i] = text
-            yield (v, sorted((mine - {i}) | ({i} if by_you else set())),
-                   {**used, str(i): verdict} if verdict else used)
+            for i in g:
+                v[i] = text
+            yield (v, sorted((mine - set(g)) | (set(g) if by_you else set())),
+                   {**used, **{str(i): verdict for i in g}} if verdict else used)
 
 
 def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -> str:
@@ -551,7 +587,7 @@ def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -
                 continue
             todo = sorted({i for i, (a, b) in enumerate(zip(rec["lines"], lines)) if a != b}
                           | set(gen.get("targets", [])))
-            verdicts, alts, blocked = {}, {}, None
+            verdicts, alts, reasons = {}, {}, {}
             for i in todo:
                 proposed = lines[i] if lines[i] != rec["lines"][i] else ""
                 key = (gen["id"], i + 1, diff_cell(rec["lines"][i], proposed) if proposed
@@ -571,12 +607,15 @@ def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -
                     verdicts[str(i)] = verdict
                 alts[i] = alternatives(row, verdict, proposed, reason is None,
                                        yours.get((gen["id"], i + 1), []), name)
-                if not alts[i] and blocked is None and (verdict == "dislike" or reason):
-                    blocked = "disliked" if verdict == "dislike" else reason
+                if not alts[i] and (verdict == "dislike" or reason):
+                    reasons[i] = "disliked" if verdict == "dislike" else reason
+            groups = repeat_groups(rec["lines"], todo)
+            share_repeats(alts, groups)
+            blocked = next((reasons[i] for i in todo if i in reasons and not alts[i]), None)
             if blocked:
                 dropped[blocked] += 1
                 continue
-            for version, edited, used in versions(lines, alts, verdicts):
+            for version, edited, used in versions(lines, alts, verdicts, groups):
                 key = (gen["id"], tuple(version))
                 if version == rec["lines"]:
                     dropped["nothing changed"] += 1
@@ -596,6 +635,91 @@ def export_source(name: str, spec: dict, sections, rows: list[dict], detector) -
             f"to vet; not paired: {dict(dropped)}")
 
 
+HUMAN = "human"
+HUMAN_REQUEST = "needs your version"
+
+
+def accepted_texts(rows: list[dict]) -> dict[tuple[str, int], list[tuple[str, bool, str]]]:
+    """{(id, line): [(text, written by you, verdict)]} of every accepted version of a line in
+    any source (liked or superliked proposals and your own versions), superliked first."""
+    found: dict[tuple[str, int], list] = {}
+    for r in sorted(rows, key=lambda r: r.get("verdict") != "superlike"):
+        v = r.get("verdict", "").strip().lower()
+        text = (r.get("edit") or "").strip() or r.get("rewrite", "")
+        if v in APPROVE and text:
+            mine = any(x.split(": ", 1)[-1] == YOURS for x in r.get("sources", "").split("; "))
+            alts = found.setdefault((r["id"], int(r["line"])), [])
+            if text not in [a[0] for a in alts]:
+                alts.append((text, mine or bool((r.get("edit") or "").strip()), v))
+    return found
+
+
+def export_human(sections, rows: list[dict], detector) -> str:
+    """The human source: sections that the other sources leave incomplete, finished by you.
+
+    A line of a section is asked in the vetting app's `human` list (a sheet row with status
+    HUMAN_REQUEST, its rewrite empty) when the section has at least one accepted line, the
+    line has a detected explicit word, no accepted version in any source (repeats share theirs)
+    and no proposal still waiting for your verdict. Your versions written in that list are rows
+    with status `human: your version`. A section whose explicit lines all have an accepted
+    version and that uses at least one of yours from the human list is a pair of this source
+    (other lines: the first accepted version from any source; one more pair per further
+    version of a line you wrote here)."""
+    accepted = accepted_texts(rows)
+    pending = {(r["id"], int(r["line"])) for r in rows
+               if r.get("rewrite") and not r.get("verdict", "").strip()
+               and not only_nonsense(r)}
+    by_key = {row_key(r): r for r in rows}
+    mine = {(r["id"], int(r["line"])) for r in rows
+            if f"{HUMAN}: {YOURS}" in r.get("sources", "")
+            and r.get("verdict", "").strip().lower() in APPROVE}
+    asked, pairs, seen = 0, [], set()
+    for sid in sorted({r["id"] for r in rows}):
+        if sid not in sections:
+            continue
+        source, rec = sections[sid]
+        lines = rec["lines"]
+        targets = [i for i, l in enumerate(lines) if detector.find(l)]
+        if not targets:
+            continue
+        alts = {i: list(accepted.get((sid, i + 1), [])) for i in targets}
+        groups = repeat_groups(lines, targets)
+        share_repeats(alts, groups)
+        if not any(alts.values()):
+            continue
+        for g in groups:
+            if alts[g[0]] or any((sid, i + 1) in pending for i in g):
+                continue
+            i = g[0]  # repeats are asked once
+            key = (sid, i + 1, "")
+            row = by_key.get(key)
+            if row is None:
+                row = {"id": sid, "line": str(i + 1), "artist": rec["artist"],
+                       "title": rec["title"], "rewrite_diff": "", "original": lines[i],
+                       "rewrite": "", "edit": "", "verdict": "", "note": "", "sources": ""}
+                by_key[key] = row
+                rows.append(row)
+            if HUMAN not in source_names(row):
+                add_source(row, HUMAN, HUMAN_REQUEST)
+            asked += 1
+        if any(not alts[i] for i in targets) or not any((sid, i + 1) in mine for i in targets):
+            continue
+        verdicts = {str(i): alts[i][0][2] for i in targets if alts[i]}
+        for version, edited, used in versions(list(lines), alts, verdicts, groups):
+            if version == lines or detector.find("\n".join(version)):
+                continue
+            if (sid, tuple(version)) in seen:
+                continue
+            seen.add((sid, tuple(version)))
+            pair = to_pair({"model": "human", "prompt_version": None, "style": "human"},
+                           source, rec, version)
+            pair["human_edited"], pair["human_verdicts"] = edited, used
+            pair["from"], pair["edited"] = [HUMAN], True
+            pairs.append(pair)
+    write_pairs(HUMAN, pairs)
+    return f"{HUMAN}: {len(pairs)} completed sections; {asked} lines to write in the human list"
+
+
 def export(names: list[str] | None = None) -> str:
     """Export the named sources (default all) and update the sheet. Returns the summaries."""
     sections, detector, specs = load_sections(), ExplicitDetector(), sources()
@@ -606,6 +730,7 @@ def export(names: list[str] | None = None) -> str:
             lines.append(f"{name}: unknown source (known: {', '.join(specs)})")
             continue
         lines.append(export_source(name, specs[name], sections, rows, detector))
+    lines.append(export_human(sections, rows, detector))
     for r in rows:  # forget removed sources; rows only they proposed are dropped
         kept = [x for x in r.get("sources", "").split("; ")
                 if x and x.split(":", 1)[0] not in REMOVED_SOURCES]
@@ -722,11 +847,15 @@ def rebuild() -> str:
 
 
 def remove_old_pair_files(names: set[str]) -> list[str]:
-    """Delete pairs/<name>.* of sources that are no longer sources (a run now in a group)."""
+    """Delete pairs/<name>.* of sources that are no longer sources: a run whose file is here but
+    that now belongs to a group (method()). Pair files of sources whose runs are not on this
+    machine (outputs/ is not shared) are kept: they cannot be rebuilt here."""
     gone = []
     for f in sorted(PAIRS_DIR.glob("*.patch.jsonl")):
         name = f.name.removesuffix(".patch.jsonl")
         if name in names or name in (FINAL, LINES):
+            continue
+        if not generation_path(name).exists() or method(name) == name:
             continue
         for ext in (".patch.jsonl", ".jsonl", ".md"):
             (PAIRS_DIR / f"{name}{ext}").unlink(missing_ok=True)
@@ -739,7 +868,7 @@ def update() -> str:
     of sources that no longer exist removed, final and lines combined."""
     names = list(sources())
     text = export(names)
-    gone = remove_old_pair_files(set(names))
+    gone = remove_old_pair_files(set(names) | {HUMAN})
     return "\n".join([text] + ([f"removed old pair files: {', '.join(gone)}"] if gone else [])
                      + [combine()])
 

@@ -3,7 +3,7 @@ transformers
 peft
 datasets
 accelerate
-bitsandbytes
+bitsandbytes; platform_system != "Darwin"  # 4-bit local generation needs an NVIDIA GPU
 sentence-transformers
 bert-score
 pandas

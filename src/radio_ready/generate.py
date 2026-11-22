@@ -95,6 +95,19 @@ CPU_EMBEDDINGS_MAP = {"model.embed_tokens": "cpu", "lm_head": "cpu", "model.laye
 
 
 def load_model(name: str, four_bit: bool, cpu_embeddings: bool):
+    """NVIDIA GPU: 4-bit NF4 (bitsandbytes). Apple GPU (MPS): float16, unquantized, since
+    bitsandbytes is CUDA-only; needs about 2 bytes per parameter of unified memory (Qwen2.5-7B
+    ~15 GB, Qwen3-14B ~29 GB), so outputs can differ slightly from the 4-bit runs."""
+    if not torch.cuda.is_available():
+        if torch.backends.mps.is_available():
+            print(f"Apple GPU (MPS): loading {name} in float16 without 4-bit quantization",
+                  flush=True)
+            tok = AutoTokenizer.from_pretrained(name)
+            model = AutoModelForCausalLM.from_pretrained(
+                name, dtype=torch.float16, device_map="mps").eval()
+            return tok, model
+        raise SystemExit("Local generation needs a GPU: NVIDIA (CUDA, 4-bit) or Apple (MPS, "
+                         "float16). The data steps, vetting and SFT export run on the CPU.")
     tok = AutoTokenizer.from_pretrained(name)
     quant = BitsAndBytesConfig(
         load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16,

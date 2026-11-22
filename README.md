@@ -5,10 +5,11 @@ end rhyme.
 
 ## Approach
 
-1. **Data**: explicit lyric sections from Genius for synthetic rewriting; sections of Kidz Bop
-   songs as a separate side-by-side and evaluation set.
-2. **SFT**: LoRA fine-tune Qwen2.5-1.5B-Instruct on ParaDetox, then on lyric pairs conditioned
-   on syllable and rhyme control tokens.
+1. **Data**: explicit lyric sections from Genius, rewritten by a local 7B model (`free.py`
+   v2, chosen by human vetting) and vetted line by line; sections of Kidz Bop songs as a
+   separate side-by-side and evaluation set.
+2. **SFT**: LoRA fine-tune Qwen2.5-1.5B-Instruct on ParaDeHate, then on the vetted lyric pairs,
+   with optional control tokens for the lines to edit, syllables and rhyme (`sft.py`).
 3. **DPO**: preference pairs ranked by the constraint scorers.
 4. **Evaluation**: explicit-content removal, semantic similarity, syllable and rhyme accuracy,
    human ratings.
@@ -30,13 +31,14 @@ src/radio_ready/
   genius.py           Genius cleaning, sections, sampling
   aae.py              AAE vernacular proportion
   scoring.py          similarity, toxicity and fluency models
-  prompts.py          rewrite prompts and answer parsers
-  generate.py         local-model rewrites with candidate selection
-  rhyme_swap.py       pairs from the end-rhyme thesaurus (explicit word -> clean rhyme)
-  pairs.py            SFT pairs from generations
+  free.py             synthetic rewrites (7B, section context; the method used)
+  pairs.py            pairs from generations and the vetting sheet
+  vet.py, rhymes.py   human vetting app and its rhyme suggestions (vet.bat)
+  paradehate.py       ParaDeHate pairs in the same format
+  sft.py              SFT examples with optional control tokens
   commercial.py       copy-paste table for commercial LLMs
-  commercial_batch.py batch prompts of new lines for commercial LLMs
-  compare.py          side-by-side scores of rewrite systems
+  experiments: generate.py, prompts.py, rewrite.py, rhyme_swap.py, noise.py,
+               commercial_batch.py, compare.py (see "Other generation methods")
   text.py             normalization, syllables, stress, rhyme
   cmu.py              CMU Pronouncing Dictionary lookups (reads data/raw/cmudict)
   paths.py            file locations
@@ -54,6 +56,29 @@ python -m venv .venv && source .venv/Scripts/activate && pip install -r requirem
 
 On Linux/macOS use `source .venv/bin/activate`. The full run downloads ~4 GB and takes roughly
 45 minutes; later runs reuse downloaded files.
+
+### On a Mac
+
+Everything except local generation runs on a Mac (CPU), including the vetting app:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && pip install -e . && python -m radio_ready.pipeline
+```
+
+- `bitsandbytes` is skipped on macOS (`requirements.txt` marker); only GPU generation needs it.
+- The vetting app needs Tk: the python.org installer includes it; with Homebrew Python run
+  `brew install python-tk`. Double-click `vet.command` (or `python -m radio_ready.vet`).
+  Rhyme suggestions are Cmd+1-9 instead of Alt+1-9; superlike is Ctrl+Enter or Cmd+Enter.
+- The generation runs (`outputs/`) are not shared (they contain lyrics). Every proposed line is
+  in the committed `annotations/vetting.csv`, so the start window lists each source from the
+  sheet and it can be vetted without the run files; pair files of sources whose runs are not
+  on the machine are kept, never deleted.
+- Local generation (`free.py`, `generate.py`) uses an NVIDIA GPU with 4-bit models; on an Apple
+  GPU (MPS) it loads float16 models instead (Qwen2.5-7B needs about 15 GB of unified memory).
+- The 1.5B SFT data (`paradehate`, `sft`) is built on the CPU; training code should pick CUDA,
+  then MPS, then CPU.
+- `annotations/vetting.csv` is one shared file: vet different sources at the same time, or
+  pull before and push after a session, to avoid merge conflicts.
 
 ## Pipeline
 
@@ -82,6 +107,7 @@ python -m radio_ready.pipeline --with-rhyme --with-noise    # also new rhyme / n
 | 5 | `kidzbop` | Kidz Bop, Genius, step 3 | `data/artifacts/kidzbop_*.csv`, `data/processed/kidzbop/{sections,pilot}.jsonl` |
 | 6 | `genius` | Genius, Kidz Bop, step 3 | `data/processed/genius_sections.jsonl` |
 | 7 | `aae` | step 6, TwitterAAE | adds `aae_proportion` to step 6 output |
+| 7b | `rhyme_vocab` | Genius | `data/artifacts/rhyme_vocab.json` (`rhymes --build`; the vetting app's rhyme suggestions) |
 | 8 | `commercial` | steps 5, 6 | `data/commercial/{prompt.txt,commercial_table.csv}` |
 | 9 | `noise` (optional) | step 5 | `outputs/generations/qwen2.5-7b-instruct-4bit_pilot_v9-noise-vowels_n5.jsonl` (`generate --style noise-vowels --samples 5`) |
 | 10 | `rhyme` (optional) | step 5 | `outputs/generations/rhyme_pilot_rhyme-v2.jsonl` (`rhyme_swap`) |
@@ -290,88 +316,63 @@ proportion before and after a rewrite.
 
 ## Rewrite generation
 
-`generate.py` rewrites sections with a local model; `pairs.py` turns the results into SFT pairs.
-Prompts are written out in full in `prompts.py`.
+The synthetic pairs come from **`free.py` version 2** (Qwen2.5-7B-Instruct, 4-bit), chosen by
+human vetting (below). One request per 4-line block with a flagged line (a line with a detected
+explicit word): the block is shown as context, flagged lines are marked with their censored
+words, syllable count and the end words they rhyme with, and may be reworded freely as long as
+the censored words are gone and meaning, voice, slang, syllables and end rhyme are kept.
+Unflagged lines are always restored as written. Version 2 also names the stock swaps of the
+vetting sheet (shit -> stuff, bitch -> girl, fuck -> mess, ...) and asks for a fresh rewrite
+instead. Per block: one greedy answer and 4 samples (temperature 1.0, top-p 0.9); a candidate is
+out if it keeps a detected or disguised explicit word, is toxic (>= 0.9), unchanged, or brings
+in a non-word; the rest are ranked by syllables (within one), end rhyme, then similarity x
+relative CoLA fluency. Details: `findings/free_prompt.md`.
+
+**Version 3** (default) mines the stock swaps automatically instead of taking them from the
+vetting sheet: every replacement of an explicit word in every generation run, the vetting
+sheet, the Kidz Bop substitutions and the official clean versions is counted per explicit word
+(inflections merged). A one-word replacement used for 3+ different lines of a word is a stock
+swap of that word (shit -> stuff, thing, nonsense, trash; bitch -> girl, chick, lady; nigga ->
+homie, folks); one that is a stock swap of 3+ words (girl, man, thing, hell, ...) or on the v2
+list is generic for every line. The prompt names the stock swaps of the words flagged in the
+block; a rewrite that brings one in ranks below those that do not. On the same 10 sections,
+rewritten lines with a stock swap: v2 12 of 22, v3 7 of 20.
 
 ```bash
-# pilot (Kidz Bop sections, default input)
-python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings --style stanza-free --samples 5
-# Genius sections for SFT pairs (--limit N for a partial run; interrupted runs resume)
-python -m radio_ready.generate --model Qwen/Qwen3-14B --cpu-embeddings --style stanza-free --samples 5   --input data/processed/genius_sections.jsonl
+python -m radio_ready.free --offset 117 --limit 100 --name free_genius118-217_free-v3
 ```
 
-Qwen2.5-7B-Instruct (default) and Qwen3-14B load in 4-bit (NF4, bitsandbytes); on an 8 GB GPU
-Qwen3-14B needs `--cpu-embeddings`. Prompt styles (`--style`):
+Each run writes `outputs/generations/<name>.jsonl`; the vetting app lists all `free-v2` runs as
+one source.
 
-| Style | Request | Hints in the prompt |
-| --- | --- | --- |
-| `surgical` (default) | one per line with a detected word, 4 lines above and below as context | detected words |
-| `surgical-free` | as `surgical`; the whole line may be reworded | detected words, syllable count |
-| `stanza` | one per 4-line stanza with a detected word | detected words |
-| `stanza-free` | as `stanza`; lines may be reworded | detected words |
-| `plain` | whole section; the model decides what radio would censor | none |
-| `annotated` | whole section with syllable counts, rhyme letters and REWRITE marks | all |
-| `noise-vowels`, `noise-gibberish`, `noise-blank` | one per 4-line stanza; the explicit words are replaced by made-up sounds or blanks (`noise.py`) and the model fills them in | the noise words |
+**Human vetting** (`annotations/vetting.csv`, every proposed line judged as written; share of
+lines per source):
 
-Every style asks to keep the meaning, rhythm and syllable count, the end rhyme, the artist's
-voice, and slang, dialect, grammar and spelling. `--rhyme` (free styles) makes the model write
-the rhyme pattern before its answer; in the pilot it copied the example pattern and did not
-help.
+| Source | Lines | Accepted as written (like + superlike) | Edited | Disliked |
+| --- | --- | --- | --- | --- |
+| Gemini (commercial) | 70 | 73% | 14% | 13% |
+| **free v2 (local 7B)** | 113 | **66%** | 24% | **10%** |
+| free v3 (local 7B, mined stock swaps) | not vetted yet | | | |
+| Claude (commercial) | 260 | 64% | 12% | 24% |
+| free v1 (local 7B) | 65 | 61% | 26% | 12% |
+| solid (`rewrite.py`, 7B + 14B) | 261 | 53% | 26% | 21% |
+| `generate.py` v3 (7B, marked lines) | 71 | 44% | 10% | 46% |
+| noise styles | 169 | 32% | 5% | 63% |
 
-`--samples N` draws N candidates per request (temperature 1.0, top-p 0.9: top-p cuts the
-unlikely tail, the temperature varies the wording) and keeps the best:
+### Other generation methods (experiments, not used for the training data)
 
-1. Filters (ParaDeHate): no detected explicit word, toxicity < 0.9, similarity of the changed
-   lines to their originals ≥ 0.70.
-2. Ranking: fewest broken end rhymes, every line within one syllable, then the highest
-   similarity × fluency, where fluency is the CoLA acceptability of each changed line relative
-   to its original (the ParaDetox fluency model). It is relative because lines in dialect score
-   low on both sides; it catches nonsense such as "I should be a sad stuff".
+Kept for the record; each is a source in the vetting app. Findings: `findings/README.md`.
 
-Output: `outputs/generations/<name>.jsonl`, one record per section with the merged lines,
-`valid` (every request gave a usable answer), `passed` (every chosen candidate passed the
-filters) and every candidate with its scores. Genius sections reserved for commercial LLMs are
-skipped.
+- `generate.py`: prompt styles v1-v9 (whole section, annotated section, one line or 4-line stanza
+  with context, freer rewording, noise words in place of explicit words), optional best-of-N
+  with the ParaDeHate filters. Qwen3-14B runs with `--cpu-embeddings` on an 8 GB GPU.
+- `rewrite.py` (solid): 7B word-replacement draft, Qwen3-14B for hard lines.
+- `rhyme_swap.py`: explicit word swapped for a clean rhyme (`rhymes.py`), then reworded by the 7B.
+- `commercial_batch.py`: batches of new lines or 3-line windows for Claude / Gemini.
+- `compare.py`: automatic side-by-side scores of any runs (explicit left, syllables and rhyme on
+  changed lines, clean lines kept, slang kept, LaBSE, AAE delta) and a blinded ranking sheet.
 
 ### Synthetic pairs
-
-`rewrite.py`: every explicit line gets a Qwen2.5-7B draft that replaces only the explicit words
-(no rhyme or syllable hints; one-for-one word swaps away from the explicit words are put back,
-so dialect stays as written). Hard lines (explicit end word, several explicit words, or a draft
-that fails a check) are rewritten by Qwen3-14B, which sees only the drafts, scored on meaning
-against the draft and on syllables and end rhyme against the original.
-
-```bash
-python -m radio_ready.rewrite [--input FILE] [--limit N]    # pilot by default
-```
-
-`rhyme_swap.py`: swap, then reword. Every explicit word of the line is first swapped for a
-clean word from the end-rhyme thesaurus (`rhymes.py`, the vetting app's Alt+n suggestions): 6
-varied words per explicit word that rhyme with it, with its syllable count (within one). The
-words of all explicit words are combined (up to 64 lines: 6 x 6 for two words, 4 x 4 x 4 for
-three, ...). The swaps are ranked without a model: the `generate.py` filters, then similarity +
-0.05 x masked-LM slot fit - CoLA fluency lost (the slot fit keeps the part of speech). A bare
-swap rarely makes sense ("Been through some bad exist"), so Qwen2.5-7B (4-bit, about 5.5 GB of
-GPU memory; always on) rewords 4 of them, the best first and then those whose words the others
-do not use: it sees the original line, the
-swapped line and two lines around it as plain text (no syllable counts or rhyme letters) and
-changes the words around the new word so the line makes sense and keeps its meaning, keeping
-the new word, the end rhyme and about the same syllables. An answer counts only if it keeps the
-new word, the end rhyme (rhymes with the original, or keeps the swapped end word) and is within
-2 syllables of the original. The best answer that passes the filters wins; bare swaps are never
-used as rewrites.
-
-```bash
-python -m radio_ready.rhyme_swap [--input FILE] [--limit N] [--k 6] [--drafts 4]
-# -> outputs/generations/rhyme_<input>_rhyme-v2.jsonl, source rhyme_<input>_rhyme-v2
-```
-
-Kidz Bop pilot (50 sections, 67 lines with an explicit word, GPU, about 5 s a section): 29 lines
-reworded, 17 of them usable (filters, CoLA drop <= 0.3), e.g. "stacked up like my pants" and
-"Ooh slick, I'm a dangerous man with some dough in my pocket". Of the 268 7B answers 129 dropped
-the rhyme word (often for a better one: "lay your truth bare"), 60 broke the end rhyme by adding
-words after it, and 21 went on to the next lyric line. Lines with no kept answer are on the
-sheet with an empty rewrite, for your edit.
 
 `pairs.py` turns each source into pairs. Sources: the `solid_*` rewrite runs, the rhyme swaps
 (`rhyme_*`; they need your approval), the commercial models (`commercial_*`, from
@@ -390,6 +391,11 @@ Every version of a line you accepted is a pair of its own: the proposal when you
 superliked it (or it passed the filters, needs no approval and you have not vetted it), and
 each of your own versions of it that you liked or superliked. A section gives one pair with the
 first accepted version of every line, plus one pair per further accepted version of a line.
+Repeated lines (the same explicit line more than once in a section) share their versions: a
+version accepted for any occurrence counts for all of them, every pair uses one version for all
+occurrences, and each further accepted version is a complete-section pair of its own. The
+vetting app asks a repeated line once. On the current sheet this pairs 19 more sections and
+skips 275 repeat lines in the vetting queue.
 A section is left out when one of its lines has no accepted version and was disliked, or needs
 approval; and when something explicit is left. Identical pairs (same section, same lines) are
 kept once, within a source and in `final`; different versions are never merged.
@@ -421,10 +427,23 @@ rhyme with the explicit word itself (perfect, slant or assonance: bitch -> cinch
 with its syllable count, never a sound-alike of it or of its last sounds, never a word on the
 Surge list or Kidz Bop's profanity list (piss, crap) (`rhymes.py`: CMU rhymes of words common
 in clean lyrics, scored by masked-LM fit in the slot and meaning, then picked to differ from
-each other in meaning and sound; `python -m radio_ready.rhymes --build` once). Every explicit
+each other in meaning and sound; built by the pipeline's `rhyme_vocab` step). Every explicit
 word of the line gets suggestions, numbered in order: 9 for one word, 4 each for two, 3 each
 for three, fewer as there are more. Distinctive rewrites come first,
 generic ones ("stuff", "things") last.
+
+**Finishing sections yourself (`human` list).** A section is not paired when one of its explicit
+lines has no accepted version. The `human` list at the top of the start window asks for exactly
+those lines: the section has accepted lines, but this line has no accepted version in any source
+and no proposal waiting for your verdict (every proposal was disliked, or no model rewrote it).
+You write the clean line (Alt+1-9 for rhymes; Enter only saves a clean, changed line; Esc
+skips). A section whose lines are then all covered is a pair of the `human` source: your
+accepted lines from any source plus the lines you wrote there. On the current sheet: 100 lines
+in 53 sections.
+
+Rhyme suggestions also cover rap spellings missing from the CMU dictionary (-a, -as, -az for
+-er, -ers: playa, killa, nigga): their pronunciation comes from the -er form. Explicit words,
+Surge and Kidz Bop profanity, and sound-alikes of the replaced word are never suggested.
 
 All verdicts go to one sheet, `annotations/vetting.csv` (committed, no lyrics: rewrites and
 edits are diffs against the original line). It has one row per line and proposed rewrite, so a
@@ -457,41 +476,55 @@ answers it cannot use (wrong number of lines). Re-running the step only adds new
 columns and never changes filled cells; close the file in Excel first. Options:
 `python -m radio_ready.commercial --genius-sections 100 --models gpt-5`.
 
-Batches of new lines, one chat message each (`commercial_batch.py`):
+Batches of new lines or 3-line windows, one chat message each (`commercial_batch.py`;
+`--items N`, `--version 2` for windows, `--export` after pasting the answers into
+`batch_NNN_<model>.txt`) become the sources `commercial-<model>` and `commercial-windows-<model>`.
+
+## Training data
+
+**ParaDeHate** (first SFT stage). `python -m radio_ready.download paradehate`, then:
 
 ```bash
-python -m radio_ready.commercial_batch --items 50   # data/commercial/batches/batch_NNN.txt
-python -m radio_ready.commercial_batch --export     # after pasting the answers
+python -m radio_ready.paradehate
 ```
 
-Each batch holds lines you do not have yet: sections already in the vetting sheet, a
-generation run, the commercial table or an earlier batch are left out, and so are lines whose
-text is already in one of them. One item per section and one per song: a 4-line stanza whose
-lines are all explicit, rewritten as a whole, or else a single explicit line with no context.
-Paste the prompt into Claude or Gemini and the whole numbered answer into
-`batch_NNN_<model>.txt` next to it; `--export` writes `commercial_batch_<model>.jsonl`, which
-the vetting app lists as its own source (approval required).
+Writes `data/processed/paradehate/pairs.jsonl` in the pair format of `pairs.py` (one-line
+`original` and `rewrite`, `changed = [0]`, `source = "paradehate"`), plus `explicit_left`,
+`aae_original` and `aae_rewrite`. Of 8,276 pairs, 7,637 are kept (581 duplicate originals, 18
+empty or unchanged, 40 with a detected explicit word in the rewrite dropped; `--keep-explicit`
+keeps those); split 80/10/10 by a hash of the original: 6,094 / 782 / 761. The GPT-4o-mini
+rewrites formalize the text: the AAE proportion drops from 0.225 to 0.125 on average and by 0.2
+or more in 18% of pairs.
 
-Version 2 (`--version 2 --items 30`) asks for windows instead: the line before, the explicit
-line and the line after, with every explicit word in the window rewritten. A section's windows
-cover all its explicit lines; overlapping windows go in later batches, which show the lines
-with the earlier rounds' rewrites applied (`--model`, default claude, says whose answers).
-Each version 2 batch holds the next rounds of the sections already started, then the new
-sections (`--items 0` for only the next rounds). `--export` writes
-`commercial_window_<model>.jsonl`, one record per section with every answered window applied.
-
-### Side-by-side comparison
+**SFT examples** from any pair files (default `pairs/final.jsonl` and the ParaDeHate pairs):
 
 ```bash
-python -m radio_ready.compare
+python -m radio_ready.sft                              # no control tokens
+python -m radio_ready.sft --controls edit syl rhyme    # with control tokens
 ```
 
-Scores Kidz Bop, every local generation file and every commercial model on the same sections:
-explicit words left, lines changed, syllable match and end rhyme kept (over changed lines only,
-so copying a line is not counted as a success), clean lines copied unchanged, benign slang
-kept, LaBSE similarity, AAE delta. The evaluation models (LaBSE, s-nlp toxicity) differ from
-the models that select candidates, so a rewrite is not scored by the model that picked it. Outputs in `outputs/comparison/<name>/`: `scores.csv`, `summary.csv`,
-`side_by_side.md`, and a blinded `ranking.csv` with `ranking_key.csv` for human ranking.
+Writes `data/processed/sft/<name>.jsonl` (`id`, `source`, `split`, `controls`, `prompt`,
+`completion`) and `<name>.tokens.json`, the control tokens to add to the tokenizer. The prompt
+is an instruction and the original lines, each preceded by its control tokens; the completion is
+the rewritten lines (unchanged lines copied). Control values come from the original lines, so
+they are known at inference time:
+
+| Control | Token | Value |
+| --- | --- | --- |
+| `edit` | `<edit>` | line has a detected explicit word |
+| `syl` | `<syl:N>` | syllables of the line (max 30) |
+| `rhyme` | `<rhyme:X>` | the line's letter in the section's rhyme scheme |
+| `end` | `<end:KEY>` | end-rhyme sound (open vocabulary, not added to the tokenizer) |
+| `stress` | `<stress:0101>` | CMU stress pattern (open vocabulary) |
+
+ParaDeHate texts are one line, so they get only `edit` and `syl`. The token spelling and the
+instructions are constants at the top of `sft.py`.
+
+```
+Rewrite these lyrics as a clean radio edit. Keep the line count, meaning, syllables, rhyme, slang and dialect.
+<edit> <syl:12> <rhyme:A> You'd better jump ship, this bastard is sinking fast
+<syl:13> <rhyme:A> There's nothing to save here, our worth has all but passed
+```
 
 ## Scoring models
 
@@ -521,6 +554,7 @@ code keep their own licenses:
 | Dataset | License |
 | --- | --- |
 | [ParaDetox](https://huggingface.co/datasets/s-nlp/paradetox) | OpenRAIL++ |
+| [ParaDeHate](https://huggingface.co/datasets/ScaDSAI/ParaDeHate) | no license stated on the dataset card (research use) |
 | [The Pudding data (Kidz Bop)](https://github.com/the-pudding/data/tree/master/kidz-bop) | MIT |
 | [Genius lyrics (cleaned)](https://huggingface.co/datasets/theelderemo/genius-lyrics-cleaned) | MIT (dataset); lyrics are copyrighted by their rights holders |
 | [Spotify tracks](https://huggingface.co/datasets/maharshipandya/spotify-tracks-dataset) | BSD |

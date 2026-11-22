@@ -16,6 +16,7 @@ from radio_ready.paths import CMUDICT_FILE, KIDZ_BOP_CSV, RAW
 
 HF_DATASETS = {
     "paradetox": "s-nlp/paradetox",
+    "paradehate": "ScaDSAI/ParaDeHate",  # hate-speech detoxification pairs (GPT-4o-mini)
     "genius": "theelderemo/genius-lyrics-cleaned",
     "spotify-tracks": "maharshipandya/spotify-tracks-dataset",  # Spotify API `explicit` flag
     "surge-profanity": "mmathys/profanity",  # Surge AI Obscenity List mirror (MIT)
@@ -48,7 +49,7 @@ MODELS = [
 ]
 
 SOURCES = [
-    "paradetox", "kidz-bop", "genius", "spotify-tracks", "surge-profanity", "mgphot", "twitteraae",
+    "paradetox", "paradehate", "kidz-bop", "genius", "spotify-tracks", "surge-profanity", "mgphot", "twitteraae",
     "cmudict", "models",
 ]
 

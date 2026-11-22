@@ -39,7 +39,7 @@ import numpy as np
 
 from radio_ready import cmu, paths
 from radio_ready.explicit import ExplicitDetector
-from radio_ready.text import _phones, rhyme_key, word_syllables
+from radio_ready.text import _phones as _cmu_phones, rhyme_key, word_syllables
 
 VOCAB_JSON = paths.ARTIFACTS / "rhyme_vocab.json"
 WORD = re.compile(r"[a-z]+(?:'[a-z]+)?")
@@ -130,8 +130,27 @@ def assonance_index() -> dict[str, list[str]]:
     return found
 
 
+def _phones(word: str) -> list[str] | None:
+    """CMU phones, or for a rap spelling missing from the dictionary (-a, -as, -az for -er,
+    -ers: playa, brotha, killa, niggas) the phones of the -er form with its final ER0 read
+    as AH0."""
+    found = _cmu_phones(word)
+    if found:
+        return found
+    w = word.lower().strip("'")
+    for end, base, plural in (("az", "er", True), ("as", "er", True), ("a", "er", False)):
+        if w.endswith(end) and len(w) > len(end) + 1:
+            ph = _cmu_phones(w[: -len(end)] + base)
+            if ph and ph[-1] == "ER0":
+                return ph[:-1] + ["AH0"] + (["Z"] if plural else [])
+    return None
+
+
 def keys(word: str) -> tuple[str, str]:
     phones = _phones(word)
+    if phones and not _cmu_phones(word):  # spelling fallback: perfect key from its phones
+        perfect = re.sub(r"\d", "", cmu.rhyming_part(" ".join(phones)))
+        return perfect, slant_key(phones)
     return rhyme_key(word), (slant_key(phones) if phones else "")
 
 
