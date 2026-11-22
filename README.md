@@ -467,6 +467,14 @@ Paste the prompt into Claude or Gemini and the whole numbered answer into
 `batch_NNN_<model>.txt` next to it; `--export` writes `commercial_batch_<model>.jsonl`, which
 the vetting app lists as its own source (approval required).
 
+Version 2 (`--version 2 --items 30`) asks for windows instead: the line before, the explicit
+line and the line after, with every explicit word in the window rewritten. A section's windows
+cover all its explicit lines; overlapping windows go in later batches, which show the lines
+with the earlier rounds' rewrites applied (`--model`, default claude, says whose answers).
+Each version 2 batch holds the next rounds of the sections already started, then the new
+sections (`--items 0` for only the next rounds). `--export` writes
+`commercial_window_<model>.jsonl`, one record per section with every answered window applied.
+
 ### Side-by-side comparison
 
 ```bash
